@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts text into translated English image cards through a REST API.
- * Version: 1.4.0
+ * Version: 1.4.1
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '1.4.0';
+	const VERSION            = '1.4.1';
 	const REST_NAMESPACE     = 'text-to-image/v1';
 	const GITHUB_REPOSITORY  = 'boxa007/deepseek';
 	const GITHUB_PLUGIN_FILE = 'text-to-image-api/text-to-image-api.php';
@@ -42,11 +42,11 @@ final class Text_To_Image_API {
 		}
 
 		$release = self::get_github_release();
-		if ( ! $release || ! version_compare( $release['version'], $transient->checked[ $plugin_file ], '>' ) ) {
+		if ( ! $release ) {
 			return $transient;
 		}
 
-		$transient->response[ $plugin_file ] = (object) array(
+		$update_item = (object) array(
 			'slug'        => 'text-to-image-api',
 			'plugin'      => $plugin_file,
 			'new_version' => $release['version'],
@@ -55,6 +55,15 @@ final class Text_To_Image_API {
 			'requires'    => '5.9',
 			'requires_php'=> '7.4',
 		);
+
+		if ( version_compare( $release['version'], $transient->checked[ $plugin_file ], '>' ) ) {
+			$transient->response[ $plugin_file ] = $update_item;
+		} else {
+			// WordPress uses the no_update entry to decide whether an external
+			// updater supports its per-plugin auto-update switch.
+			$update_item->{'update-supported'}   = true;
+			$transient->no_update[ $plugin_file ] = $update_item;
+		}
 
 		return $transient;
 	}
