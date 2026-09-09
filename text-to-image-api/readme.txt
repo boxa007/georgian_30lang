@@ -4,7 +4,7 @@ Tags: translation, image, rest api, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.4.2
+Stable tag: 1.5.0
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -23,13 +23,14 @@ The generated image links are protected with short-lived, random tokens. The end
 Requirements:
 
 * PHP GD extension, including FreeType support for best typography.
-* WordPress must be able to make outgoing HTTPS requests to Google Translate.
+* An OpenRouter API key. Add it in Settings > Text to Image API; it is stored only in this WordPress installation.
 
 == Installation ==
 
 1. In WordPress, go to Plugins > Add New > Upload Plugin.
 2. Upload `text-to-image-api.zip` and activate **Text to Image API**.
-3. Send a POST request to `/wp-json/text-to-image/v1/translate`.
+3. Go to Settings > Text to Image API and add an OpenRouter API key.
+4. Send a POST request to `/wp-json/text-to-image/v1/translate`.
 
 == Usage ==
 
@@ -49,6 +50,9 @@ Example browser request:
 `fetch('/wp-json/text-to-image/v1/translate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: 'ქართული ტექსტი. ნაწილი 2 დარჩენილი ნაწილი'})}).then(r => r.json()).then(console.log);`
 
 == Changelog ==
+
+= 1.5.0 =
+* Added OpenRouter translation with automatic source-language detection and an admin settings page for the API key and model.
 
 = 1.4.2 =
 * Fixed a PHP/cURL compatibility error that could return 502 during translation on shared hosting.

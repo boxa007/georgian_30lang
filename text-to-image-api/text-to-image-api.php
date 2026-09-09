@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Text to Image API
- * Description: Converts text into translated English image cards through a REST API.
- * Version: 1.4.2
+ * Description: Converts selected posts into English image cards using OpenRouter.
+ * Version: 1.5.0
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '1.4.2';
+	const VERSION            = '1.5.0';
 	const REST_NAMESPACE     = 'text-to-image/v1';
 	const GITHUB_REPOSITORY  = 'boxa007/deepseek';
 	const GITHUB_PLUGIN_FILE = 'text-to-image-api/text-to-image-api.php';
@@ -20,14 +20,82 @@ final class Text_To_Image_API {
 	const IMAGE_TOKEN_TTL    = 1800;
 	const RATE_LIMIT_TTL     = 60;
 	const RATE_LIMIT_REQUESTS = 10;
+	const OPTION_API_KEY     = 't2i_openrouter_api_key';
+	const OPTION_MODEL       = 't2i_openrouter_model';
 	private static $is_processing_shortcode = false;
 
 	public static function init() {
 		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
 		add_action( 'init', array( __CLASS__, 'serve_image' ) );
 		add_action( 'save_post_post', array( __CLASS__, 'process_shortcode_post' ), 20, 3 );
+		add_action( 'admin_menu', array( __CLASS__, 'add_settings_page' ) );
+		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
 		add_filter( 'pre_set_site_transient_update_plugins', array( __CLASS__, 'inject_github_update' ) );
 		add_filter( 'plugins_api', array( __CLASS__, 'github_plugin_information' ), 20, 3 );
+	}
+
+	/** Settings are deliberately kept in WordPress, never in the post or repository. */
+	public static function add_settings_page() {
+		add_options_page(
+			__( 'Text to Image API', 'text-to-image-api' ),
+			__( 'Text to Image API', 'text-to-image-api' ),
+			'manage_options',
+			'text-to-image-api',
+			array( __CLASS__, 'render_settings_page' )
+		);
+	}
+
+	public static function register_settings() {
+		register_setting(
+			't2i_settings',
+			self::OPTION_API_KEY,
+			array( 'sanitize_callback' => array( __CLASS__, 'sanitize_api_key' ) )
+		);
+		register_setting(
+			't2i_settings',
+			self::OPTION_MODEL,
+			array( 'sanitize_callback' => 'sanitize_text_field' )
+		);
+	}
+
+	public static function sanitize_api_key( $key ) {
+		$key = trim( sanitize_text_field( $key ) );
+		// Leaving the password field empty must not erase a working key.
+		return '' === $key ? (string) get_option( self::OPTION_API_KEY, '' ) : $key;
+	}
+
+	public static function render_settings_page() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+		$key_is_saved = '' !== (string) get_option( self::OPTION_API_KEY, '' );
+		$model        = (string) get_option( self::OPTION_MODEL, 'google/gemini-2.5-flash-lite' );
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Text to Image API', 'text-to-image-api' ); ?></h1>
+			<p><?php esc_html_e( 'Translate shortcode-marked posts into English image cards with OpenRouter.', 'text-to-image-api' ); ?></p>
+			<form method="post" action="options.php">
+				<?php settings_fields( 't2i_settings' ); ?>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="t2i_openrouter_api_key"><?php esc_html_e( 'OpenRouter API key', 'text-to-image-api' ); ?></label></th>
+						<td>
+							<input name="<?php echo esc_attr( self::OPTION_API_KEY ); ?>" id="t2i_openrouter_api_key" type="password" class="regular-text" autocomplete="new-password" placeholder="<?php echo esc_attr( $key_is_saved ? __( 'Key saved — enter a new value only to replace it', 'text-to-image-api' ) : 'sk-or-v1-...' ); ?>" />
+							<p class="description"><?php esc_html_e( 'The key is saved in this WordPress database and is never written into posts or GitHub.', 'text-to-image-api' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="t2i_openrouter_model"><?php esc_html_e( 'Model', 'text-to-image-api' ); ?></label></th>
+						<td>
+							<input name="<?php echo esc_attr( self::OPTION_MODEL ); ?>" id="t2i_openrouter_model" type="text" class="regular-text" value="<?php echo esc_attr( $model ); ?>" />
+							<p class="description"><?php esc_html_e( 'Default: google/gemini-2.5-flash-lite — fast and inexpensive for translation.', 'text-to-image-api' ); ?></p>
+						</td>
+					</tr>
+				</table>
+				<?php submit_button(); ?>
+			</form>
+		</div>
+		<?php
 	}
 
 	/** Make releases from the public GitHub repository available in WordPress updates. */
@@ -333,29 +401,54 @@ final class Text_To_Image_API {
 			return $cached;
 		}
 
-		$url = add_query_arg(
-			array(
-				'client' => 'gtx',
-				'sl'     => 'auto',
-				'tl'     => 'en',
-				'dt'     => 't',
-				'q'      => $text,
-			),
-			'https://translate.googleapis.com/translate_a/single'
-		);
-		$body = self::remote_get_body( $url, 'application/json' );
-
-		$data = json_decode( $body, true );
-		if ( isset( $data[0] ) && is_array( $data[0] ) ) {
-			$translated_parts = wp_list_pluck( $data[0], 0 );
-			$translated       = trim( implode( '', array_filter( $translated_parts, 'is_string' ) ) );
-			if ( '' !== $translated ) {
-				set_transient( $cache_key, $translated, 30 * DAY_IN_SECONDS );
-				return $translated;
-			}
+		$api_key = (string) get_option( self::OPTION_API_KEY, '' );
+		if ( '' === $api_key ) {
+			return new WP_Error( 'openrouter_key_missing', __( 'OpenRouter API key is missing. Add it in Settings → Text to Image API.', 'text-to-image-api' ), array( 'status' => 424 ) );
 		}
 
-		return new WP_Error( 'translation_failed', __( 'Translation service could not be reached. The article was not changed.', 'text-to-image-api' ), array( 'status' => 502 ) );
+		$model = (string) get_option( self::OPTION_MODEL, 'google/gemini-2.5-flash-lite' );
+		$model = '' === $model ? 'google/gemini-2.5-flash-lite' : $model;
+		$response = wp_remote_post(
+			'https://openrouter.ai/api/v1/chat/completions',
+			array(
+				'timeout' => 45,
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Content-Type'  => 'application/json',
+					'HTTP-Referer'  => home_url( '/' ),
+					'X-Title'       => 'Text to Image API',
+				),
+				'body'    => wp_json_encode(
+					array(
+						'model'       => $model,
+						'temperature' => 0,
+						'messages'    => array(
+							array(
+								'role'    => 'system',
+								'content' => 'Translate the user text into fluent, natural English. Detect the source language automatically. Return only the translation: no comments, labels, quotes, markdown, or HTML.',
+							),
+							array(
+								'role'    => 'user',
+								'content' => $text,
+							),
+						),
+					)
+				),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error( 'translation_failed', __( 'OpenRouter could not be reached. The article was not changed.', 'text-to-image-api' ), array( 'status' => 424 ) );
+		}
+
+		$data = json_decode( wp_remote_retrieve_body( $response ), true );
+		$translated = isset( $data['choices'][0]['message']['content'] ) ? trim( wp_strip_all_tags( (string) $data['choices'][0]['message']['content'] ) ) : '';
+		if ( 200 === (int) wp_remote_retrieve_response_code( $response ) && '' !== $translated ) {
+			set_transient( $cache_key, $translated, 30 * DAY_IN_SECONDS );
+			return $translated;
+		}
+
+		return new WP_Error( 'translation_failed', __( 'OpenRouter did not return a translation. Check the API key, balance, and selected model.', 'text-to-image-api' ), array( 'status' => 424 ) );
 	}
 
 	/** Fetch JSON safely, with a native cURL fallback for restrictive WordPress hosts. */
