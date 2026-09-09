@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts text into translated English image cards through a REST API.
- * Version: 1.4.1
+ * Version: 1.4.2
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '1.4.1';
+	const VERSION            = '1.4.2';
 	const REST_NAMESPACE     = 'text-to-image/v1';
 	const GITHUB_REPOSITORY  = 'boxa007/deepseek';
 	const GITHUB_PLUGIN_FILE = 'text-to-image-api/text-to-image-api.php';
@@ -387,7 +387,9 @@ final class Text_To_Image_API {
 			)
 		);
 		$curl_body = curl_exec( $curl );
-		$curl_code = (int) curl_getinfo( $curl, CURLINFO_RESPONSE_CODE );
+		// CURLINFO_RESPONSE_CODE is absent on older shared-hosting PHP/cURL stacks.
+		// CURLINFO_HTTP_CODE provides the same status code and is widely supported.
+		$curl_code = (int) curl_getinfo( $curl, CURLINFO_HTTP_CODE );
 		curl_close( $curl );
 		return 200 === $curl_code && is_string( $curl_body ) ? $curl_body : '';
 	}

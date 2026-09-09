@@ -4,7 +4,7 @@ Tags: translation, image, rest api, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.4.1
+Stable tag: 1.4.2
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -49,6 +49,9 @@ Example browser request:
 `fetch('/wp-json/text-to-image/v1/translate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: 'ქართული ტექსტი. ნაწილი 2 დარჩენილი ნაწილი'})}).then(r => r.json()).then(console.log);`
 
 == Changelog ==
+
+= 1.4.2 =
+* Fixed a PHP/cURL compatibility error that could return 502 during translation on shared hosting.
 
 = 1.4.1 =
 * Show WordPress's per-plugin auto-update switch even when a GitHub release is already current.
