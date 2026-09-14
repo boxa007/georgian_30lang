@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Text to Image API
- * Description: Converts selected posts into English image cards using OpenRouter.
- * Version: 1.5.0
+ * Description: Converts selected HTML blocks into crawler-inaccessible image text.
+ * Version: 2.0.0
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '1.5.0';
+	const VERSION            = '2.0.0';
 	const REST_NAMESPACE     = 'text-to-image/v1';
 	const GITHUB_REPOSITORY  = 'boxa007/deepseek';
 	const GITHUB_PLUGIN_FILE = 'text-to-image-api/text-to-image-api.php';
@@ -20,16 +20,13 @@ final class Text_To_Image_API {
 	const IMAGE_TOKEN_TTL    = 1800;
 	const RATE_LIMIT_TTL     = 60;
 	const RATE_LIMIT_REQUESTS = 10;
+	const MAX_BLOCK_TEXT_LENGTH = 900;
 	const OPTION_API_KEY     = 't2i_openrouter_api_key';
 	const OPTION_MODEL       = 't2i_openrouter_model';
-	private static $is_processing_shortcode = false;
+	private static $is_processing_blocks = false;
 
 	public static function init() {
-		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
-		add_action( 'init', array( __CLASS__, 'serve_image' ) );
-		add_action( 'save_post_post', array( __CLASS__, 'process_shortcode_post' ), 20, 3 );
-		add_action( 'admin_menu', array( __CLASS__, 'add_settings_page' ) );
-		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
+		add_action( 'save_post_post', array( __CLASS__, 'process_protected_blocks' ), 20, 3 );
 		add_filter( 'pre_set_site_transient_update_plugins', array( __CLASS__, 'inject_github_update' ) );
 		add_filter( 'plugins_api', array( __CLASS__, 'github_plugin_information' ), 20, 3 );
 	}
@@ -73,7 +70,7 @@ final class Text_To_Image_API {
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Text to Image API', 'text-to-image-api' ); ?></h1>
-			<p><?php esc_html_e( 'Translate shortcode-marked posts into English image cards with OpenRouter.', 'text-to-image-api' ); ?></p>
+			<p><?php esc_html_e( 'This version converts .imgjs1 and .nextjs1 blocks to image-only content when posts are saved. No API key is needed.', 'text-to-image-api' ); ?></p>
 			<form method="post" action="options.php">
 				<?php settings_fields( 't2i_settings' ); ?>
 				<table class="form-table" role="presentation">
@@ -244,38 +241,38 @@ final class Text_To_Image_API {
 	}
 
 	/**
-	 * Standard WordPress publishing stays untouched until a post contains
-	 * [text_to_image] or [text_to_image marker="PARTE 2"].
+	 * Converts text inside .imgjs1 and .nextjs1 blocks to local images when a post
+	 * is saved. The source text is removed from post_content, so it is not exposed
+	 * as readable HTML to crawlers. All other post content stays untouched.
 	 */
-	public static function process_shortcode_post( $post_id, $post, $update ) {
-		if ( self::$is_processing_shortcode || wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) || 'auto-draft' === $post->post_status ) {
+	public static function process_protected_blocks( $post_id, $post, $update ) {
+		if ( self::$is_processing_blocks || wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) || 'auto-draft' === $post->post_status ) {
 			return;
 		}
 
-		$shortcode_pattern = '/' . get_shortcode_regex( array( 'text_to_image' ) ) . '/s';
-		if ( ! preg_match( $shortcode_pattern, $post->post_content, $shortcode_match ) ) {
+		if ( false === strpos( $post->post_content, 'imgjs1' ) && false === strpos( $post->post_content, 'nextjs1' ) ) {
 			return;
 		}
 
-		$attributes   = shortcode_parse_atts( $shortcode_match[3] );
-		$split_marker = isset( $attributes['marker'] ) ? sanitize_text_field( $attributes['marker'] ) : '';
-		$source       = trim( str_replace( $shortcode_match[0], '', $post->post_content ) );
-		$output       = self::build_output( $source, $split_marker, true );
-
+		$output = self::replace_protected_blocks( $post->post_content, $post_id );
 		if ( is_wp_error( $output ) ) {
 			update_post_meta( $post_id, '_text_to_image_api_error', $output->get_error_message() );
 			return;
 		}
 
-		self::$is_processing_shortcode = true;
+		if ( $output === $post->post_content ) {
+			return;
+		}
+
+		self::$is_processing_blocks = true;
 		$updated = wp_update_post(
 			array(
 				'ID'           => $post_id,
-				'post_content' => $source . "\n\n" . $output['full_output'],
+				'post_content' => $output,
 			),
 			true
 		);
-		self::$is_processing_shortcode = false;
+		self::$is_processing_blocks = false;
 
 		if ( is_wp_error( $updated ) ) {
 			update_post_meta( $post_id, '_text_to_image_api_error', $updated->get_error_message() );
@@ -284,6 +281,133 @@ final class Text_To_Image_API {
 
 		delete_post_meta( $post_id, '_text_to_image_api_error' );
 		update_post_meta( $post_id, '_text_to_image_api_processed_at', current_time( 'mysql', true ) );
+	}
+
+	private static function replace_protected_blocks( $content, $post_id ) {
+		if ( ! class_exists( 'DOMDocument' ) ) {
+			return new WP_Error( 'dom_missing', __( 'The PHP DOM extension is required to convert protected blocks.', 'text-to-image-api' ), array( 'status' => 500 ) );
+		}
+
+		$previous_errors = libxml_use_internal_errors( true );
+		$document        = new DOMDocument( '1.0', 'UTF-8' );
+		$document->loadHTML( '<?xml encoding="utf-8" ?><div id="text-to-image-api-root">' . $content . '</div>', LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD );
+		libxml_clear_errors();
+		libxml_use_internal_errors( $previous_errors );
+
+		$root = $document->getElementById( 'text-to-image-api-root' );
+		if ( ! $root ) {
+			return new WP_Error( 'invalid_html', __( 'Protected blocks could not be read from this post.', 'text-to-image-api' ), array( 'status' => 400 ) );
+		}
+
+		$nodes = array();
+		foreach ( $document->getElementsByTagName( '*' ) as $node ) {
+			if ( self::is_protected_node( $node ) && ! self::has_protected_ancestor( $node ) && '1' !== $node->getAttribute( 'data-t2i-rendered' ) ) {
+				$nodes[] = $node;
+			}
+		}
+
+		$image_index = 0;
+		foreach ( $nodes as $node ) {
+			$text = trim( preg_replace( '/\s+/u', ' ', (string) $node->textContent ) );
+			if ( '' === $text ) {
+				continue;
+			}
+
+			while ( $node->firstChild ) {
+				$node->removeChild( $node->firstChild );
+			}
+			$parts = self::split_text_for_images( $text );
+			foreach ( $parts as $part ) {
+				$image_url = self::create_media_image( $part, $image_index, $post_id );
+				if ( is_wp_error( $image_url ) ) {
+					return $image_url;
+				}
+				$image = $document->createElement( 'img' );
+				$image->setAttribute( 'src', $image_url );
+				$image->setAttribute( 'alt', '' );
+				$image->setAttribute( 'aria-hidden', 'true' );
+				$image->setAttribute( 'class', 'text-to-image-api-rendered' );
+				$image->setAttribute( 'style', 'display:block;max-width:100%;height:auto;' );
+				$node->appendChild( $image );
+				$image_index++;
+			}
+
+			$node->setAttribute( 'data-t2i-rendered', '1' );
+		}
+
+		return self::inner_html( $root );
+	}
+
+	private static function is_protected_node( DOMNode $node ) {
+		if ( ! $node instanceof DOMElement ) {
+			return false;
+		}
+		$classes = preg_split( '/\s+/', trim( (string) $node->getAttribute( 'class' ) ) );
+		return (bool) array_intersect( array( 'imgjs1', 'nextjs1' ), (array) $classes );
+	}
+
+	private static function has_protected_ancestor( DOMNode $node ) {
+		$parent = $node->parentNode;
+		while ( $parent ) {
+			if ( self::is_protected_node( $parent ) ) {
+				return true;
+			}
+			$parent = $parent->parentNode;
+		}
+		return false;
+	}
+
+	private static function split_text_for_images( $text ) {
+		$sentences = preg_split( '/(?<=[.!?])\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY );
+		$parts     = array();
+		$current   = '';
+		foreach ( $sentences as $sentence ) {
+			$sentence = trim( $sentence );
+			if ( self::text_length( $sentence ) > self::MAX_BLOCK_TEXT_LENGTH ) {
+				if ( '' !== $current ) {
+					$parts[] = $current;
+					$current = '';
+				}
+				$parts = array_merge( $parts, self::hard_split_text( $sentence ) );
+				continue;
+			}
+			if ( '' !== $current && self::text_length( $current . ' ' . $sentence ) > self::MAX_BLOCK_TEXT_LENGTH ) {
+				$parts[] = $current;
+				$current = '';
+			}
+			$current = trim( $current . ' ' . $sentence );
+		}
+		if ( '' !== $current ) {
+			$parts[] = $current;
+		}
+
+		return $parts ? $parts : array( $text );
+	}
+
+	private static function hard_split_text( $text ) {
+		$words   = preg_split( '/\s+/u', trim( $text ), -1, PREG_SPLIT_NO_EMPTY );
+		$parts   = array();
+		$current = '';
+		foreach ( $words as $word ) {
+			if ( '' !== $current && self::text_length( $current . ' ' . $word ) > self::MAX_BLOCK_TEXT_LENGTH ) {
+				$parts[] = $current;
+				$current = '';
+			}
+			$current = trim( $current . ' ' . $word );
+		}
+		return '' === $current ? $parts : array_merge( $parts, array( $current ) );
+	}
+
+	private static function text_length( $text ) {
+		return function_exists( 'mb_strlen' ) ? mb_strlen( $text ) : strlen( $text );
+	}
+
+	private static function inner_html( DOMNode $node ) {
+		$html = '';
+		foreach ( $node->childNodes as $child ) {
+			$html .= $node->ownerDocument->saveHTML( $child );
+		}
+		return $html;
 	}
 
 	private static function build_output( $text, $split_marker, $persist_images ) {
@@ -508,7 +632,7 @@ final class Text_To_Image_API {
 	}
 
 	/** Create a permanent Media Library file instead of a temporary preview URL. */
-	private static function create_media_image( $text, $index ) {
+	private static function create_media_image( $text, $index, $post_id = 0 ) {
 		if ( ! function_exists( 'imagecreatetruecolor' ) || ! function_exists( 'imagepng' ) ) {
 			return new WP_Error( 'gd_missing', __( 'The PHP GD extension is required to generate images.', 'text-to-image-api' ), array( 'status' => 500 ) );
 		}
@@ -531,10 +655,11 @@ final class Text_To_Image_API {
 		$attachment_id = wp_insert_attachment(
 			array(
 				'post_mime_type' => 'image/png',
-				'post_title'     => sprintf( __( 'Translated text — part %d', 'text-to-image-api' ), $index + 1 ),
+				'post_title'     => sprintf( __( 'Protected text image %d', 'text-to-image-api' ), $index + 1 ),
 				'post_status'    => 'inherit',
 			),
-			$upload['file']
+			$upload['file'],
+			(int) $post_id
 		);
 		if ( is_wp_error( $attachment_id ) ) {
 			return $attachment_id;
@@ -582,14 +707,12 @@ final class Text_To_Image_API {
 				imagettftext( $image, 24, 0, 40, $y, $black, $font_path, $line );
 				$y += 50;
 			}
-			imagettftext( $image, 12, 0, 40, $height - 20, $gray, $font_path, 'Part ' . ( $index + 1 ) );
 		} else {
 			$y = 40;
 			foreach ( $lines as $line ) {
 				imagestring( $image, 5, 20, $y, $line, $black );
 				$y += 35;
 			}
-			imagestring( $image, 2, 20, $height - 20, 'Part ' . ( $index + 1 ), $gray );
 		}
 
 		return $image;

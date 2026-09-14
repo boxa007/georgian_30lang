@@ -1,55 +1,48 @@
 === Text to Image API ===
 Contributors: boxa007
-Tags: translation, image, rest api, gd
+Tags: image, content protection, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.5.0
+Stable tag: 2.0.0
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Translates submitted text into English and returns four image cards and formatted English text through a REST API.
+Converts text inside selected HTML classes into local image blocks when a post is saved.
 
 == Description ==
 
-The plugin accepts text through its REST endpoint. It keeps the portion before the second-part marker, divides that text into up to four parts, translates each part into English, and returns image-card HTML together with the English text formatted at 11pt.
+The plugin automatically detects HTML elements with the class `imgjs1` or `nextjs1` whenever a WordPress post is saved. It replaces each marked block's text with one or more locally generated PNG images while preserving the outer element and its CSS classes.
 
-For the usual WordPress REST publishing flow, add `[text_to_image]` to a post body. The plugin processes only that post on save, removes the shortcode, preserves the source text, and appends four permanent Media Library images plus the English translation. Use `[text_to_image marker="PARTE 2"]` when the split point should be explicit.
+No shortcode, translation API, or API key is needed. Normal WordPress REST post publishing remains unchanged: include the classes in the HTML sent by your system and the plugin processes only those marked blocks on save.
 
-For any language, add an optional `split_marker` property with the exact marker from the source. Without it, the plugin detects a standalone numbered heading such as `PARTE 2`, `ЧАСТЬ 2`, `भाग 2`, `PART II`, or `第２部`.
+Long marked blocks are divided into multiple images to keep the resulting cards readable. Blocks already rendered by the plugin are marked internally and are not processed again on later saves.
 
-The generated image links are protected with short-lived, random tokens. The endpoint also applies a small per-IP rate limit to reduce misuse of the public translation route.
+The generated images are stored in the Media Library and attached to the post. Source text is removed from the saved post HTML; images use empty alt text.
 
 Requirements:
 
 * PHP GD extension, including FreeType support for best typography.
-* An OpenRouter API key. Add it in Settings > Text to Image API; it is stored only in this WordPress installation.
 
 == Installation ==
 
 1. In WordPress, go to Plugins > Add New > Upload Plugin.
 2. Upload `text-to-image-api.zip` and activate **Text to Image API**.
-3. Go to Settings > Text to Image API and add an OpenRouter API key.
-4. Send a POST request to `/wp-json/text-to-image/v1/translate`.
+3. Publish posts normally. Wrap any text that must become an image in `imgjs1` or `nextjs1`.
 
 == Usage ==
 
-POST JSON to `/wp-json/text-to-image/v1/translate`:
+Send regular post content containing either class:
 
-`{"text":"თქვენი ქართული ტექსტი... ნაწილი 2 ... დარჩენილი ტექსტი"}`
+`<div class="imgjs1">Text to render as an image.</div>`
 
-The response contains:
-
-* `images` — HTML image cards.
-* `english_text` — translated text in HTML.
-* `full_output` — both values combined.
-* `remaining` — the source text from `ნაწილი 2` onward.
-
-Example browser request:
-
-`fetch('/wp-json/text-to-image/v1/translate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: 'ქართული ტექსტი. ნაწილი 2 დარჩენილი ნაწილი'})}).then(r => r.json()).then(console.log);`
+`<p class="nextjs1">This paragraph will also become a local PNG.</p>`
 
 == Changelog ==
+
+= 2.0.0 =
+* Replaced shortcode/translation processing with automatic image rendering for `.imgjs1` and `.nextjs1` blocks on post save.
+* Removed the need for an external translation API or API key for protected blocks.
 
 = 1.5.0 =
 * Added OpenRouter translation with automatic source-language detection and an admin settings page for the API key and model.
