@@ -1,0 +1,29 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zip
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          grep -q "Version: ${VERSION}$" text-to-image-api/text-to-image-api.php || { echo "Plugin header version does not match tag ${VERSION}"; exit 1; }
+          zip -r "text-to-image-api-${VERSION}.zip" text-to-image-api
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" "text-to-image-api-${VERSION}.zip" \
+            --title "Text to Image API ${VERSION}" \
+            --notes "Black-and-white cards as 3-level gray PNG (~4.7x smaller), no resized copies, cleanup of older cards. See readme.txt changelog." \
+            --latest
