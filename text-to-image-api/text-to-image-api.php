@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.14
+ * Version: 2.4.15
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.14';
+	const VERSION            = '2.4.15';
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
 	const GRAY_LEVELS        = 3;     // black-and-white cards: 3 gray levels (white, mid-gray, black), ~4.7x smaller PNG
 	const CLEANUP_BATCH_SECONDS = 40;
@@ -42,6 +42,8 @@ final class Text_To_Image_API {
 		add_action( 'admin_post_t2i_refresh_next_cards', array( __CLASS__, 'refresh_next_cards_from_admin' ) );
 		add_filter( 'pre_set_site_transient_update_plugins', array( __CLASS__, 'inject_github_update' ) );
 		add_filter( 'plugins_api', array( __CLASS__, 'github_plugin_information' ), 20, 3 );
+		// Install GitHub releases automatically (WordPress background updates, twice a day).
+		add_filter( 'auto_update_plugin', array( __CLASS__, 'auto_update_self' ), 10, 2 );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'add_github_update_link' ) );
 		add_action( 'admin_post_t2i_update_from_github', array( __CLASS__, 'update_from_github' ) );
 		add_action( 'admin_notices', array( __CLASS__, 'render_update_notice' ) );
@@ -133,6 +135,10 @@ final class Text_To_Image_API {
 		$stats['bytes']   += $bytes;
 		update_option( 't2i_purge_stats', $stats, false );
 		return array( 'phase' => 'files', 'repointed' => $repointed, 'deleted_now' => $deleted, 'bytes_now' => $bytes, 'kept' => $kept, 'left' => $left, 'total' => $stats );
+	}
+
+	public static function auto_update_self( $update, $item ) {
+		return ( isset( $item->plugin ) && self::GITHUB_PLUGIN_FILE === $item->plugin ) ? true : $update;
 	}
 
 	public static function add_cron_interval( $schedules ) {

@@ -1,13 +1,17 @@
-name: Release plugin
+name: Release plugins
 
 # A release is created automatically when main gets a plugin version that has
-# no release yet (version taken from the plugin header). The zip asset name
-# matches what the plugin's GitHub updater looks for: text-to-image-api-*.zip
+# no release yet (version read from the plugin header).
+#  - Text to Image API: tag vX.Y.Z, asset text-to-image-api-X.Y.Z.zip, marked "latest"
+#    (its updater reads /releases/latest).
+#  - Image Importer Extended: tag iie-vX.Y.Z, asset image-importer-extended-X.Y.Z.zip,
+#    never marked "latest" (its updater scans the release list for iie-v tags).
 on:
   push:
     branches: [main]
     paths:
       - 'text-to-image-api/**'
+      - 'image-importer-extended/**'
       - '.github/workflows/release.yml'
   workflow_dispatch:
 
@@ -15,24 +19,33 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  text-to-image-api:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Read version
-        id: v
-        run: |
-          VERSION=$(sed -n 's/^ \* Version: *//p' text-to-image-api/text-to-image-api.php | head -1 | tr -d '\r ')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Build zip and create release if missing
+      - name: Release if version is new
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.v.outputs.version }}
         run: |
-          if gh release view "v$VERSION" >/dev/null 2>&1; then echo "Release v$VERSION exists"; exit 0; fi
+          VERSION=$(sed -n 's/^ \* Version: *//p' text-to-image-api/text-to-image-api.php | head -1 | tr -d '\r ')
+          if gh release view "v$VERSION" >/dev/null 2>&1; then echo "v$VERSION exists"; exit 0; fi
           zip -r "text-to-image-api-$VERSION.zip" text-to-image-api
-          gh release create "v$VERSION" "text-to-image-api-$VERSION.zip" \
-            --target "$GITHUB_SHA" \
-            --title "Text to Image API $VERSION" \
-            --notes "Black-and-white cards as 3-level gray PNG (~4.7x smaller), no resized copies, cleanup of older cards. See readme.txt changelog." \
-            --latest
+          gh release create "v$VERSION" "text-to-image-api-$VERSION.zip" --target "$GITHUB_SHA" \
+            --title "Text to Image API $VERSION" --notes "See text-to-image-api/readme.txt changelog." --latest
+
+  image-importer-extended:
+    runs-on: ubuntu-latest
+    needs: text-to-image-api
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release if version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(sed -n 's/^ \* Version: *//p' image-importer-extended/image-importer-extended.php | head -1 | tr -d '\r ')
+          if gh release view "iie-v$VERSION" >/dev/null 2>&1; then echo "iie-v$VERSION exists"; exit 0; fi
+          zip -r "image-importer-extended-$VERSION.zip" image-importer-extended
+          gh release create "iie-v$VERSION" "image-importer-extended-$VERSION.zip" --target "$GITHUB_SHA" \
+            --title "Image Importer Extended $VERSION" \
+            --notes "Featured images stored at max 500 px wide, JPEG quality 60; reuse an already imported cover for the second post; one-time shrink of older featured images; automatic updates from GitHub." \
+            --latest=false
