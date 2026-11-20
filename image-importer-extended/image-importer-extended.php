@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Image Importer Extended
  * Description: Imports the first image in a post received through the REST API and assigns it as the featured image.
- * Version: 9.3.1
+ * Version: 9.3.2
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,12 +11,13 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Image_Importer_Extended {
-	const VERSION      = '9.3.1';
+	const VERSION      = '9.3.2';
+	const PER_BATCH    = 50;    // old covers taken per run, in order; one run every 2 minutes
 	const MAX_WIDTH    = 500;   // featured images are stored on the site at most 500 px wide
 	const JPEG_QUALITY = 60;
 	const REPO         = 'boxa007/georgian_30lang';
 	const TAG_PREFIX   = 'iie-v';
-	const BATCH_SECONDS = 30;
+	const BATCH_SECONDS = 20;
 
 	private $running = array();
 
@@ -33,6 +34,7 @@ class Image_Importer_Extended {
 		add_filter( 'cron_schedules', array( $this, 'cron_interval' ) );
 		add_action( 'iie_shrink_batch', array( $this, 'shrink_batch' ) );
 		add_action( 'init', array( $this, 'schedule_shrink' ) );
+		add_action( 'admin_menu', array( $this, 'add_status_page' ) );
 
 		/* n8n creates articles through POST /wp-json/wp/v2/posts. */
 		add_action( 'rest_after_insert_post', array( $this, 'import_for_rest_post' ), 999, 3 );
@@ -258,8 +260,70 @@ class Image_Importer_Extended {
 
 	/* ---------- one-time shrink of older featured images ---------- */
 
+	/**
+	 * Server load guard: skip a batch when the 1-minute load average is above
+	 * 70% of CPU cores. Unknown load or core count never blocks the job.
+	 */
+	private function server_busy() {
+		if ( ! function_exists( 'sys_getloadavg' ) ) {
+			return false;
+		}
+		$load = @sys_getloadavg();
+		if ( ! is_array( $load ) || ! isset( $load[0] ) ) {
+			return false;
+		}
+		$cores = (int) get_transient( 'img_guard_cores' );
+		if ( $cores < 1 ) {
+			$cores = 0;
+			$info  = @file_get_contents( '/proc/cpuinfo' );
+			if ( is_string( $info ) ) {
+				$cores = substr_count( $info, "\nprocessor" ) + ( 0 === strpos( $info, 'processor' ) ? 1 : 0 );
+			}
+			$cores = max( 1, $cores );
+			set_transient( 'img_guard_cores', $cores, DAY_IN_SECONDS );
+		}
+		return (float) $load[0] > 0.7 * $cores;
+	}
+
+	private function shrink_counts() {
+		global $wpdb;
+		$nc    = (int) wp_rand( 1, 2000000000 );
+		$total = (int) $wpdb->get_var( "SELECT COUNT(DISTINCT meta_value) FROM {$wpdb->postmeta} WHERE meta_key = '_thumbnail_id' AND meta_value > 0 AND {$nc} = {$nc}" );
+		$done  = (int) $wpdb->get_var(
+			"SELECT COUNT(DISTINCT t.meta_value) FROM {$wpdb->postmeta} t JOIN {$wpdb->postmeta} m ON m.post_id = t.meta_value AND m.meta_key = '_iie_small' AND m.meta_value = '1'
+			 WHERE t.meta_key = '_thumbnail_id' AND t.meta_value > 0 AND {$nc} = {$nc}"
+		);
+		return array( 'total' => $total, 'done' => min( $done, $total ), 'left' => max( 0, $total - $done ) );
+	}
+
+	public function add_status_page() {
+		add_media_page( 'Image Importer: сжатие обложек', 'Сжатие обложек (Image Importer)', 'manage_options', 'iie-shrink', array( $this, 'render_status_page' ) );
+	}
+
+	public function render_status_page() {
+		$c     = $this->shrink_counts();
+		$stats = get_option( 'iie_shrink_stats', array() );
+		$mb    = function ( $b ) { return number_format_i18n( (float) $b / 1048576, 1 ) . ' МБ'; };
+		$pct   = $c['total'] ? round( 100 * $c['done'] / $c['total'] ) : 100;
+		$next  = wp_next_scheduled( 'iie_shrink_batch' );
+		echo '<div class="wrap"><h1>Image Importer: сжатие старых обложек</h1>';
+		echo '<p style="font-size:15px">Всего обложек: <b>' . (int) $c['total'] . '</b> · пережато: <b>' . (int) $c['done'] . '</b> (' . (int) $pct . '%) · осталось: <b>' . (int) $c['left'] . '</b></p>';
+		echo '<div style="background:#ddd;height:14px;max-width:600px;border-radius:7px;overflow:hidden"><div style="background:#2271b1;height:14px;width:' . (int) $pct . '%"></div></div>';
+		echo '<table class="widefat striped" style="max-width:600px;margin-top:16px"><tbody>';
+		echo '<tr><td>Было (пережатые обложки)</td><td>' . esc_html( $mb( isset( $stats['before'] ) ? $stats['before'] : 0 ) ) . '</td></tr>';
+		echo '<tr><td>Стало</td><td>' . esc_html( $mb( isset( $stats['after'] ) ? $stats['after'] : 0 ) ) . '</td></tr>';
+		echo '<tr><td>Настройки</td><td>' . (int) self::MAX_WIDTH . ' px, качество ' . (int) self::JPEG_QUALITY . '</td></tr>';
+		echo '<tr><td>Порция</td><td>до ' . (int) self::PER_BATCH . ' обложек раз в 2 минуты, не дольше ' . (int) self::BATCH_SECONDS . ' с; пропускается, если сервер загружен больше 70%</td></tr>';
+		echo '<tr><td>Статус</td><td>' . ( get_option( 'iie_shrink_done' ) ? 'завершено' : ( $next ? 'идёт, следующая порция ' . esc_html( human_time_diff( time(), $next ) ) : 'ожидает запуска' ) ) . '</td></tr>';
+		$skip = get_option( 'iie_shrink_last_skip' );
+		if ( $skip ) {
+			echo '<tr><td>Последний пропуск из-за нагрузки</td><td>' . esc_html( $skip ) . ' UTC</td></tr>';
+		}
+		echo '</tbody></table><p style="color:#666">Новые обложки сразу сохраняются маленькими; здесь — только старые.</p></div>';
+	}
+
 	public function cron_interval( $s ) {
-		$s['iie_every_minute'] = array( 'interval' => 60, 'display' => 'Every minute (Image Importer shrink)' );
+		$s['iie_every_minute'] = array( 'interval' => 120, 'display' => 'Every 2 minutes (Image Importer shrink)' );
 		return $s;
 	}
 
@@ -281,6 +345,10 @@ class Image_Importer_Extended {
 		if ( get_transient( 'iie_shrink_lock' ) ) {
 			return;
 		}
+		if ( $this->server_busy() ) {
+			update_option( 'iie_shrink_last_skip', gmdate( 'c' ), false );
+			return;
+		}
 		set_transient( 'iie_shrink_lock', 1, 90 );
 		if ( function_exists( 'wp_raise_memory_limit' ) ) {
 			wp_raise_memory_limit( 'image' );
@@ -292,7 +360,7 @@ class Image_Importer_Extended {
 			"SELECT DISTINCT t.meta_value FROM {$wpdb->postmeta} t
 			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = t.meta_value AND m.meta_key = '_iie_small'
 			 WHERE t.meta_key = '_thumbnail_id' AND t.meta_value > 0 AND m.meta_id IS NULL AND {$nc} = {$nc}
-			 LIMIT 200"
+			 ORDER BY t.meta_value LIMIT " . (int) self::PER_BATCH
 		);
 		if ( empty( $ids ) ) {
 			update_option( 'iie_shrink_done', gmdate( 'c' ), false );

@@ -4,7 +4,7 @@ Tags: image, content protection, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.4.15
+Stable tag: 2.4.16
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -39,6 +39,10 @@ Send regular post content containing either class:
 `<p class="nextjs1">This paragraph will also become a local PNG.</p>`
 
 == Changelog ==
+
+= 2.4.16 =
+* Gentle cleanup: at most 50 old cards per run, one run every 2 minutes (20 s max), skipped while server load is above 70% of CPU cores.
+* Media > Сжатие карточек (Text to Image): status page with converted / remaining counts and space saved.
 
 = 2.4.15 =
 * Opt into WordPress automatic background updates from GitHub releases.

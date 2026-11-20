@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.15
+ * Version: 2.4.16
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,10 +12,11 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.15';
+	const VERSION            = '2.4.16';
+	const CLEANUP_PER_BATCH  = 50;    // old cards taken per run, in order; one run every 2 minutes
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
 	const GRAY_LEVELS        = 3;     // black-and-white cards: 3 gray levels (white, mid-gray, black), ~4.7x smaller PNG
-	const CLEANUP_BATCH_SECONDS = 40;
+	const CLEANUP_BATCH_SECONDS = 20;
 	const REST_NAMESPACE     = 'text-to-image/v1';
 	const GITHUB_REPOSITORY  = 'boxa007/deepseek';
 	const GITHUB_PLUGIN_FILE = 'text-to-image-api/text-to-image-api.php';
@@ -51,6 +52,7 @@ final class Text_To_Image_API {
 		add_filter( 'cron_schedules', array( __CLASS__, 'add_cron_interval' ) );
 		add_action( 't2i_cleanup_batch', array( __CLASS__, 'cleanup_batch' ) );
 		add_action( 'init', array( __CLASS__, 'schedule_cleanup' ) );
+		add_action( 'admin_menu', array( __CLASS__, 'add_status_page' ) );
 	}
 
 	/** Status (public, no data) and manual batch run (needs the secret key). */
@@ -67,7 +69,7 @@ final class Text_To_Image_API {
 			if ( 'files' === $request->get_param( 'phase' ) ) {
 				return rest_ensure_response( self::purge_orphan_copies() );
 			}
-			self::cleanup_batch();
+			self::cleanup_batch( true );
 			$ran = true;
 		}
 		return rest_ensure_response( array(
@@ -141,8 +143,72 @@ final class Text_To_Image_API {
 		return ( isset( $item->plugin ) && self::GITHUB_PLUGIN_FILE === $item->plugin ) ? true : $update;
 	}
 
+	/**
+	 * Server load guard: skip a batch when the 1-minute load average is above
+	 * 70% of CPU cores. Unknown load or core count never blocks the job.
+	 */
+	private static function server_busy() {
+		if ( ! function_exists( 'sys_getloadavg' ) ) {
+			return false;
+		}
+		$load = @sys_getloadavg();
+		if ( ! is_array( $load ) || ! isset( $load[0] ) ) {
+			return false;
+		}
+		$cores = (int) get_transient( 'img_guard_cores' );
+		if ( $cores < 1 ) {
+			$cores = 0;
+			$info  = @file_get_contents( '/proc/cpuinfo' );
+			if ( is_string( $info ) ) {
+				$cores = substr_count( $info, "\nprocessor" ) + ( 0 === strpos( $info, 'processor' ) ? 1 : 0 );
+			}
+			$cores = max( 1, $cores );
+			set_transient( 'img_guard_cores', $cores, DAY_IN_SECONDS );
+		}
+		return (float) $load[0] > 0.7 * $cores;
+	}
+
+	/** Counts for the admin status page (unique query text bypasses DB query caches). */
+	private static function cleanup_counts() {
+		global $wpdb;
+		$nc    = (int) wp_rand( 1, 2000000000 );
+		$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value LIKE '%text-to-image-%.png' AND {$nc} = {$nc}" );
+		$done  = (int) $wpdb->get_var( $wpdb->prepare(
+			"SELECT COUNT(DISTINCT f.post_id) FROM {$wpdb->postmeta} f JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value = %s
+			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%%text-to-image-%%.png' AND {$nc} = {$nc}",
+			(string) self::GRAY_LEVELS
+		) );
+		return array( 'total' => $total, 'done' => min( $done, $total ), 'left' => max( 0, $total - $done ) );
+	}
+
+	public static function add_status_page() {
+		add_media_page( 'Text to Image: сжатие', 'Сжатие карточек (Text to Image)', 'manage_options', 't2i-cleanup', array( __CLASS__, 'render_status_page' ) );
+	}
+
+	public static function render_status_page() {
+		$c     = self::cleanup_counts();
+		$stats = get_option( 't2i_cleanup_stats', array() );
+		$mb    = function ( $b ) { return number_format_i18n( (float) $b / 1048576, 1 ) . ' МБ'; };
+		$pct   = $c['total'] ? round( 100 * $c['done'] / $c['total'] ) : 100;
+		$next  = wp_next_scheduled( 't2i_cleanup_batch' );
+		echo '<div class="wrap"><h1>Text to Image: сжатие старых карточек</h1>';
+		echo '<p style="font-size:15px">Всего картинок-карточек: <b>' . (int) $c['total'] . '</b> · пережато: <b>' . (int) $c['done'] . '</b> (' . (int) $pct . '%) · осталось: <b>' . (int) $c['left'] . '</b></p>';
+		echo '<div style="background:#ddd;height:14px;max-width:600px;border-radius:7px;overflow:hidden"><div style="background:#2271b1;height:14px;width:' . (int) $pct . '%"></div></div>';
+		echo '<table class="widefat striped" style="max-width:600px;margin-top:16px"><tbody>';
+		echo '<tr><td>Было (пережатые оригиналы)</td><td>' . esc_html( $mb( isset( $stats['bytes_before'] ) ? $stats['bytes_before'] : 0 ) ) . '</td></tr>';
+		echo '<tr><td>Стало</td><td>' . esc_html( $mb( isset( $stats['bytes_after'] ) ? $stats['bytes_after'] : 0 ) ) . '</td></tr>';
+		echo '<tr><td>Удалено лишних копий</td><td>' . (int) ( isset( $stats['thumbs'] ) ? $stats['thumbs'] : 0 ) . ' шт., ' . esc_html( $mb( isset( $stats['thumb_bytes'] ) ? $stats['thumb_bytes'] : 0 ) ) . '</td></tr>';
+		echo '<tr><td>Порция</td><td>до ' . (int) self::CLEANUP_PER_BATCH . ' картинок раз в 2 минуты, не дольше ' . (int) self::CLEANUP_BATCH_SECONDS . ' с; пропускается, если сервер загружен больше 70%</td></tr>';
+		echo '<tr><td>Статус</td><td>' . ( get_option( 't2i_cleanup_done' ) ? 'завершено' : ( $next ? 'идёт, следующая порция ' . esc_html( human_time_diff( time(), $next ) ) : 'ожидает запуска' ) ) . '</td></tr>';
+		$skip = get_option( 't2i_cleanup_last_skip' );
+		if ( $skip ) {
+			echo '<tr><td>Последний пропуск из-за нагрузки</td><td>' . esc_html( $skip ) . ' UTC</td></tr>';
+		}
+		echo '</tbody></table><p style="color:#666">Новые карточки сразу сохраняются маленькими; здесь — только старые.</p></div>';
+	}
+
 	public static function add_cron_interval( $schedules ) {
-		$schedules['t2i_every_minute'] = array( 'interval' => 60, 'display' => 'Every minute (Text to Image cleanup)' );
+		$schedules['t2i_every_minute'] = array( 'interval' => 120, 'display' => 'Every 2 minutes (Text to Image cleanup)' );
 		return $schedules;
 	}
 
@@ -199,9 +265,13 @@ final class Text_To_Image_API {
 	 * delete its unused resized copies and recompress the original in place
 	 * (same file name, so posts keep working). Marks each attachment as done.
 	 */
-	public static function cleanup_batch() {
+	public static function cleanup_batch( $manual = false ) {
 		global $wpdb;
 		if ( get_transient( 't2i_cleanup_lock' ) ) {
+			return;
+		}
+		if ( ! $manual && self::server_busy() ) {
+			update_option( 't2i_cleanup_last_skip', gmdate( 'c' ), false );
 			return;
 		}
 		set_transient( 't2i_cleanup_lock', 1, 120 );
@@ -219,16 +289,16 @@ final class Text_To_Image_API {
 			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$try}')
 			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%.png'
 			   AND m.meta_id IS NULL AND {$nc} = {$nc}
-			 ORDER BY f.post_id LIMIT 300"
+			 ORDER BY f.post_id LIMIT " . (int) self::CLEANUP_PER_BATCH
 		);
 		// Also repair cards whose attached file is WordPress' '-scaled' copy: posts use the original file.
 		$scaled = $wpdb->get_col(
 			"SELECT f.post_id FROM {$wpdb->postmeta} f
 			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$try}')
 			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%-scaled.png'
-			   AND m.meta_id IS NULL AND {$nc} = {$nc} LIMIT 300"
+			   AND m.meta_id IS NULL AND {$nc} = {$nc} LIMIT " . (int) self::CLEANUP_PER_BATCH
 		);
-		$ids = array_values( array_unique( array_merge( array_map( 'intval', (array) $scaled ), array_map( 'intval', (array) $ids ) ) ) );
+		$ids = array_slice( array_values( array_unique( array_merge( array_map( 'intval', (array) $scaled ), array_map( 'intval', (array) $ids ) ) ) ), 0, self::CLEANUP_PER_BATCH );
 		if ( empty( $ids ) ) {
 			update_option( 't2i_cleanup_done', gmdate( 'c' ), false );
 			wp_clear_scheduled_hook( 't2i_cleanup_batch' );
