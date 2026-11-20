@@ -4,7 +4,7 @@ Tags: image, content protection, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.4.18
+Stable tag: 2.4.19
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -39,6 +39,9 @@ Send regular post content containing either class:
 `<p class="nextjs1">This paragraph will also become a local PNG.</p>`
 
 == Changelog ==
+
+= 2.4.19 =
+* Sends a short status report (site, version, converted/remaining, space saved) to the central table: once per installed version, daily while cleanup runs, once when done.
 
 = 2.4.18 =
 * Status page counts card files (not attachment rows) and includes leftover copies removed by the files phase.

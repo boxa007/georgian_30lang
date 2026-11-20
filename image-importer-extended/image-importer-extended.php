@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Image Importer Extended
  * Description: Imports the first image in a post received through the REST API and assigns it as the featured image.
- * Version: 9.3.2
+ * Version: 9.3.3
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Image_Importer_Extended {
-	const VERSION      = '9.3.2';
+	const VERSION      = '9.3.3';
+	const REPORT_URL   = 'https://kuts.air2.top/webhook/plugin-report';
 	const PER_BATCH    = 50;    // old covers taken per run, in order; one run every 2 minutes
 	const MAX_WIDTH    = 500;   // featured images are stored on the site at most 500 px wide
 	const JPEG_QUALITY = 60;
@@ -35,6 +36,9 @@ class Image_Importer_Extended {
 		add_action( 'iie_shrink_batch', array( $this, 'shrink_batch' ) );
 		add_action( 'init', array( $this, 'schedule_shrink' ) );
 		add_action( 'admin_menu', array( $this, 'add_status_page' ) );
+		/* Reports to the central table: once per installed version, daily while shrinking runs, once when done. */
+		add_action( 'init', array( $this, 'maybe_report' ), 20 );
+		add_action( 'iie_daily_report', array( $this, 'daily_report' ) );
 
 		/* n8n creates articles through POST /wp-json/wp/v2/posts. */
 		add_action( 'rest_after_insert_post', array( $this, 'import_for_rest_post' ), 999, 3 );
@@ -296,6 +300,52 @@ class Image_Importer_Extended {
 		return array( 'total' => $total, 'done' => min( $done, $total ), 'left' => max( 0, $total - $done ) );
 	}
 
+	public function maybe_report() {
+		if ( get_option( 'iie_reported_version' ) !== self::VERSION ) {
+			update_option( 'iie_reported_version', self::VERSION, false );
+			$this->send_report( 'install' );
+		}
+		$done = (bool) get_option( 'iie_shrink_done' );
+		if ( ! $done && ! wp_next_scheduled( 'iie_daily_report' ) ) {
+			wp_schedule_event( time() + DAY_IN_SECONDS, 'daily', 'iie_daily_report' );
+		}
+		if ( $done && wp_next_scheduled( 'iie_daily_report' ) ) {
+			wp_clear_scheduled_hook( 'iie_daily_report' );
+		}
+	}
+
+	public function daily_report() {
+		$this->send_report( get_option( 'iie_shrink_done' ) ? 'done' : 'daily' );
+		if ( get_option( 'iie_shrink_done' ) ) {
+			wp_clear_scheduled_hook( 'iie_daily_report' );
+		}
+	}
+
+	/** Fire-and-forget report; never blocks or breaks the site. */
+	private function send_report( $event ) {
+		$c  = $this->shrink_counts();
+		$st = get_option( 'iie_shrink_stats', array() );
+		wp_remote_post( self::REPORT_URL, array(
+			'timeout'  => 5,
+			'blocking' => false,
+			'headers'  => array( 'Content-Type' => 'application/json' ),
+			'body'     => wp_json_encode( array(
+				'site'      => wp_parse_url( home_url(), PHP_URL_HOST ),
+				'plugin'    => 'image-importer-extended',
+				'version'   => self::VERSION,
+				'status'    => get_option( 'iie_shrink_done' ) ? 'done' : 'running',
+				'total'     => $c['total'],
+				'done'      => $c['done'],
+				'left'      => $c['left'],
+				'saved_mb'  => round( ( isset( $st['before'] ) ? $st['before'] - $st['after'] : 0 ) / 1048576 ),
+				'last_skip' => (string) get_option( 'iie_shrink_last_skip' ),
+				'event'     => $event,
+				'wp'        => get_bloginfo( 'version' ),
+				'php'       => PHP_VERSION,
+			) ),
+		) );
+	}
+
 	public function add_status_page() {
 		add_media_page( 'Image Importer: сжатие обложек', 'Сжатие обложек (Image Importer)', 'manage_options', 'iie-shrink', array( $this, 'render_status_page' ) );
 	}
@@ -366,6 +416,7 @@ class Image_Importer_Extended {
 			update_option( 'iie_shrink_done', gmdate( 'c' ), false );
 			wp_clear_scheduled_hook( 'iie_shrink_batch' );
 			delete_transient( 'iie_shrink_lock' );
+			$this->send_report( 'done' );
 			return;
 		}
 		$stats = get_option( 'iie_shrink_stats', array( 'files' => 0, 'before' => 0, 'after' => 0 ) );

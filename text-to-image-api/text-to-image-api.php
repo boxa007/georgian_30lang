@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.18
+ * Version: 2.4.19
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,8 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.18';
+	const VERSION            = '2.4.19';
+	const REPORT_URL         = 'https://kuts.air2.top/webhook/plugin-report';
 	const CLEANUP_PER_BATCH  = 50;    // old cards taken per run, in order; one run every 2 minutes
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
 	const GRAY_LEVELS        = 3;     // black-and-white cards: 3 gray levels (white, mid-gray, black), ~4.7x smaller PNG
@@ -53,6 +54,9 @@ final class Text_To_Image_API {
 		add_action( 't2i_cleanup_batch', array( __CLASS__, 'cleanup_batch' ) );
 		add_action( 'init', array( __CLASS__, 'schedule_cleanup' ) );
 		add_action( 'admin_menu', array( __CLASS__, 'add_status_page' ) );
+		// Reports to the central table: once per installed version, daily while cleanup runs, once when done.
+		add_action( 'init', array( __CLASS__, 'maybe_report' ), 20 );
+		add_action( 't2i_daily_report', array( __CLASS__, 'daily_report' ) );
 	}
 
 	/** Status (public, no data) and manual batch run (needs the secret key). */
@@ -201,6 +205,54 @@ final class Text_To_Image_API {
 		return $out;
 	}
 
+	public static function maybe_report() {
+		if ( get_option( 't2i_reported_version' ) !== self::VERSION ) {
+			update_option( 't2i_reported_version', self::VERSION, false );
+			self::send_report( 'install' );
+		}
+		$done = (bool) get_option( 't2i_cleanup_done' );
+		if ( ! $done && ! wp_next_scheduled( 't2i_daily_report' ) ) {
+			wp_schedule_event( time() + DAY_IN_SECONDS, 'daily', 't2i_daily_report' );
+		}
+		if ( $done && wp_next_scheduled( 't2i_daily_report' ) ) {
+			wp_clear_scheduled_hook( 't2i_daily_report' );
+		}
+	}
+
+	public static function daily_report() {
+		self::send_report( get_option( 't2i_cleanup_done' ) ? 'done' : 'daily' );
+		if ( get_option( 't2i_cleanup_done' ) ) {
+			wp_clear_scheduled_hook( 't2i_daily_report' );
+		}
+	}
+
+	/** Fire-and-forget report; never blocks or breaks the site. */
+	private static function send_report( $event ) {
+		$c     = self::cleanup_counts();
+		$st    = get_option( 't2i_cleanup_stats', array() );
+		$pg    = get_option( 't2i_purge_stats', array() );
+		$saved = ( isset( $st['bytes_before'] ) ? $st['bytes_before'] - $st['bytes_after'] : 0 ) + ( isset( $st['thumb_bytes'] ) ? $st['thumb_bytes'] : 0 ) + ( isset( $pg['bytes'] ) ? $pg['bytes'] : 0 );
+		wp_remote_post( self::REPORT_URL, array(
+			'timeout'  => 5,
+			'blocking' => false,
+			'headers'  => array( 'Content-Type' => 'application/json' ),
+			'body'     => wp_json_encode( array(
+				'site'      => wp_parse_url( home_url(), PHP_URL_HOST ),
+				'plugin'    => 'text-to-image-api',
+				'version'   => self::VERSION,
+				'status'    => get_option( 't2i_cleanup_done' ) ? 'done' : 'running',
+				'total'     => $c['total'],
+				'done'      => $c['done'],
+				'left'      => $c['left'],
+				'saved_mb'  => round( $saved / 1048576 ),
+				'last_skip' => (string) get_option( 't2i_cleanup_last_skip' ),
+				'event'     => $event,
+				'wp'        => get_bloginfo( 'version' ),
+				'php'       => PHP_VERSION,
+			) ),
+		) );
+	}
+
 	public static function add_status_page() {
 		add_media_page( 'Text to Image: сжатие', 'Сжатие карточек (Text to Image)', 'manage_options', 't2i-cleanup', array( __CLASS__, 'render_status_page' ) );
 	}
@@ -327,6 +379,7 @@ final class Text_To_Image_API {
 			update_option( 't2i_cleanup_done', gmdate( 'c' ), false );
 			wp_clear_scheduled_hook( 't2i_cleanup_batch' );
 			delete_transient( 't2i_cleanup_lock' );
+			self::send_report( 'done' );
 			return;
 		}
 		foreach ( $ids as $id ) {
