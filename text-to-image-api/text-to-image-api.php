@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.17
+ * Version: 2.4.18
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.17';
+	const VERSION            = '2.4.18';
 	const CLEANUP_PER_BATCH  = 50;    // old cards taken per run, in order; one run every 2 minutes
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
 	const GRAY_LEVELS        = 3;     // black-and-white cards: 3 gray levels (white, mid-gray, black), ~4.7x smaller PNG
@@ -79,6 +79,8 @@ final class Text_To_Image_API {
 			'stats'          => get_option( 't2i_cleanup_stats' ),
 			'next_scheduled' => wp_next_scheduled( 't2i_cleanup_batch' ),
 			'lock'           => (bool) get_transient( 't2i_cleanup_lock' ),
+			'counts'         => self::cleanup_counts(),
+			'markers'        => self::marker_breakdown(),
 		) );
 	}
 
@@ -172,13 +174,31 @@ final class Text_To_Image_API {
 	private static function cleanup_counts() {
 		global $wpdb;
 		$nc    = (int) wp_rand( 1, 2000000000 );
-		$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value LIKE '%text-to-image-%.png' AND {$nc} = {$nc}" );
+		// Count files, not attachment rows: several attachments can point to the same card file.
+		$total = (int) $wpdb->get_var( "SELECT COUNT(DISTINCT meta_value) FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value LIKE '%text-to-image-%.png' AND {$nc} = {$nc}" );
 		$done  = (int) $wpdb->get_var( $wpdb->prepare(
-			"SELECT COUNT(DISTINCT f.post_id) FROM {$wpdb->postmeta} f JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value = %s
+			"SELECT COUNT(DISTINCT f.meta_value) FROM {$wpdb->postmeta} f JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value = %s
 			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%%text-to-image-%%.png' AND {$nc} = {$nc}",
 			(string) self::GRAY_LEVELS
 		) );
 		return array( 'total' => $total, 'done' => min( $done, $total ), 'left' => max( 0, $total - $done ) );
+	}
+
+	/** Diagnostic: attachments of cards grouped by cleanup marker and file state. */
+	private static function marker_breakdown() {
+		global $wpdb;
+		$nc   = (int) wp_rand( 1, 2000000000 );
+		$rows = (array) $wpdb->get_results(
+			"SELECT COALESCE(m.meta_value, 'none') AS marker, COUNT(*) AS n, COUNT(DISTINCT f.meta_value) AS files
+			 FROM {$wpdb->postmeta} f LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized'
+			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%.png' AND {$nc} = {$nc}
+			 GROUP BY COALESCE(m.meta_value, 'none')"
+		);
+		$out = array();
+		foreach ( $rows as $r ) {
+			$out[ $r->marker ] = array( 'attachments' => (int) $r->n, 'files' => (int) $r->files );
+		}
+		return $out;
 	}
 
 	public static function add_status_page() {
@@ -188,6 +208,9 @@ final class Text_To_Image_API {
 	public static function render_status_page() {
 		$c     = self::cleanup_counts();
 		$stats = get_option( 't2i_cleanup_stats', array() );
+		$purge = get_option( 't2i_purge_stats', array() );
+		$stats['thumbs']      = ( isset( $stats['thumbs'] ) ? $stats['thumbs'] : 0 ) + ( isset( $purge['deleted'] ) ? $purge['deleted'] : 0 );
+		$stats['thumb_bytes'] = ( isset( $stats['thumb_bytes'] ) ? $stats['thumb_bytes'] : 0 ) + ( isset( $purge['bytes'] ) ? $purge['bytes'] : 0 );
 		$mb    = function ( $b ) { return number_format_i18n( (float) $b / 1048576, 1 ) . ' МБ'; };
 		$pct   = $c['total'] ? round( 100 * $c['done'] / $c['total'] ) : 100;
 		$next  = wp_next_scheduled( 't2i_cleanup_batch' );
