@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.16
+ * Version: 2.4.17
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.16';
+	const VERSION            = '2.4.17';
 	const CLEANUP_PER_BATCH  = 50;    // old cards taken per run, in order; one run every 2 minutes
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
 	const GRAY_LEVELS        = 3;     // black-and-white cards: 3 gray levels (white, mid-gray, black), ~4.7x smaller PNG
@@ -283,10 +283,11 @@ final class Text_To_Image_API {
 		// Unique token: W3 Total Cache's database cache must not return a stale ID list.
 		$nc  = (int) wp_rand( 1, 2000000000 );
 		$done = (string) self::GRAY_LEVELS;
-		$try  = 'try' . self::GRAY_LEVELS;
+		$try   = 'try' . self::GRAY_LEVELS;
+		$retry = 'retry' . self::GRAY_LEVELS; // a card interrupted once (e.g. PHP time limit) gets exactly one more attempt
 		$ids = $wpdb->get_col(
 			"SELECT f.post_id FROM {$wpdb->postmeta} f
-			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$try}')
+			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$retry}')
 			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%.png'
 			   AND m.meta_id IS NULL AND {$nc} = {$nc}
 			 ORDER BY f.post_id LIMIT " . (int) self::CLEANUP_PER_BATCH
@@ -294,7 +295,7 @@ final class Text_To_Image_API {
 		// Also repair cards whose attached file is WordPress' '-scaled' copy: posts use the original file.
 		$scaled = $wpdb->get_col(
 			"SELECT f.post_id FROM {$wpdb->postmeta} f
-			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$try}')
+			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$retry}')
 			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%-scaled.png'
 			   AND m.meta_id IS NULL AND {$nc} = {$nc} LIMIT " . (int) self::CLEANUP_PER_BATCH
 		);
@@ -310,7 +311,11 @@ final class Text_To_Image_API {
 				break;
 			}
 			// Mark first: if PHP dies on this image (memory/time), the next run skips it instead of looping.
-			update_post_meta( $id, '_t2i_optimized', $try );
+			$prev = (string) $wpdb->get_var( $wpdb->prepare(
+				"SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_t2i_optimized' AND " . (int) wp_rand( 1, 2000000000 ) . ' > 0 LIMIT 1',
+				$id
+			) );
+			update_post_meta( $id, '_t2i_optimized', $prev === $try ? $retry : $try );
 			$stats['last_id'] = (int) $id;
 			update_option( 't2i_cleanup_stats', $stats, false );
 			$file = get_attached_file( $id );
