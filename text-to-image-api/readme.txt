@@ -4,7 +4,7 @@ Tags: image, content protection, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.0.0
+Stable tag: 2.4.10
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -39,6 +39,11 @@ Send regular post content containing either class:
 `<p class="nextjs1">This paragraph will also become a local PNG.</p>`
 
 == Changelog ==
+
+= 2.4.10 =
+* Cards are black-and-white: PNGs are saved as a 4-level gray palette on pure white (about 4x smaller).
+* No intermediate image sizes are generated for cards (they are only shown full size): ~88% less disk, less CPU on publish.
+* One-time background cleanup of older cards: deletes their unused resized and '-scaled' copies and recompresses the original in place (same URL).
 
 = 2.0.0 =
 * Replaced shortcode/translation processing with automatic image rendering for `.imgjs1` and `.nextjs1` blocks on post save.

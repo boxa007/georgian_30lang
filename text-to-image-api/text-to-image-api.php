@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.0.0
+ * Version: 2.4.10
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,10 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.0.0';
+	const VERSION            = '2.4.10';
+	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
+	const GRAY_LEVELS        = 4;     // black-and-white cards: 4 gray levels keep anti-aliasing, ~4x smaller PNG
+	const CLEANUP_BATCH_SECONDS = 40;
 	const REST_NAMESPACE     = 'text-to-image/v1';
 	const GITHUB_REPOSITORY  = 'boxa007/deepseek';
 	const GITHUB_PLUGIN_FILE = 'text-to-image-api/text-to-image-api.php';
@@ -26,9 +29,338 @@ final class Text_To_Image_API {
 	private static $is_processing_blocks = false;
 
 	public static function init() {
+		// This is the authoritative path: it runs before WordPress persists the
+		// content, for both REST API publishing and the normal editor Update button.
+		add_filter( 'wp_insert_post_data', array( __CLASS__, 'convert_before_post_insert' ), 20, 2 );
 		add_action( 'save_post_post', array( __CLASS__, 'process_protected_blocks' ), 20, 3 );
+		// REST creates can be modified by other plugins after save_post. Run once more
+		// after the REST controller has stored the final post content.
+		add_action( 'rest_after_insert_post', array( __CLASS__, 'process_rest_protected_blocks' ), 20, 3 );
+		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
+		add_action( 'add_meta_boxes_post', array( __CLASS__, 'add_process_metabox' ) );
+		add_action( 'admin_post_t2i_process_post', array( __CLASS__, 'process_post_from_admin' ) );
+		add_action( 'admin_post_t2i_refresh_next_cards', array( __CLASS__, 'refresh_next_cards_from_admin' ) );
 		add_filter( 'pre_set_site_transient_update_plugins', array( __CLASS__, 'inject_github_update' ) );
 		add_filter( 'plugins_api', array( __CLASS__, 'github_plugin_information' ), 20, 3 );
+		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'add_github_update_link' ) );
+		add_action( 'admin_post_t2i_update_from_github', array( __CLASS__, 'update_from_github' ) );
+		add_action( 'admin_notices', array( __CLASS__, 'render_update_notice' ) );
+		// 2.4.6: one-time background cleanup of old cards (thumbnails + recompress).
+		add_filter( 'cron_schedules', array( __CLASS__, 'add_cron_interval' ) );
+		add_action( 't2i_cleanup_batch', array( __CLASS__, 'cleanup_batch' ) );
+		add_action( 'init', array( __CLASS__, 'schedule_cleanup' ) );
+	}
+
+	/** Status (public, no data) and manual batch run (needs the secret key). */
+	public static function cleanup_rest( WP_REST_Request $request ) {
+		$ran = false;
+		if ( 'POST' === $request->get_method() ) {
+			if ( '' === self::CLEANUP_KEY || ! hash_equals( self::CLEANUP_KEY, (string) $request->get_param( 'key' ) ) ) {
+				return new WP_Error( 'forbidden', 'forbidden', array( 'status' => 403 ) );
+			}
+			delete_transient( 't2i_cleanup_lock' );
+			if ( $request->get_param( 'reset' ) ) {
+				delete_option( 't2i_cleanup_done' );
+			}
+			self::cleanup_batch();
+			$ran = true;
+		}
+		return rest_ensure_response( array(
+			'version'        => self::VERSION,
+			'ran'            => $ran,
+			'done'           => get_option( 't2i_cleanup_done' ),
+			'stats'          => get_option( 't2i_cleanup_stats' ),
+			'next_scheduled' => wp_next_scheduled( 't2i_cleanup_batch' ),
+			'lock'           => (bool) get_transient( 't2i_cleanup_lock' ),
+		) );
+	}
+
+	public static function add_cron_interval( $schedules ) {
+		$schedules['t2i_every_minute'] = array( 'interval' => 60, 'display' => 'Every minute (Text to Image cleanup)' );
+		return $schedules;
+	}
+
+	public static function schedule_cleanup() {
+		if ( get_option( 't2i_cleanup_done' ) ) {
+			if ( wp_next_scheduled( 't2i_cleanup_batch' ) ) {
+				wp_clear_scheduled_hook( 't2i_cleanup_batch' );
+			}
+			return;
+		}
+		if ( ! wp_next_scheduled( 't2i_cleanup_batch' ) ) {
+			wp_schedule_event( time() + 60, 't2i_every_minute', 't2i_cleanup_batch' );
+		}
+	}
+
+	/** Convert a GD image to a small black/white/gray palette PNG binary string. */
+	private static function to_gray_png( $image ) {
+		imagefilter( $image, IMG_FILTER_GRAYSCALE );
+		imagetruecolortopalette( $image, false, self::GRAY_LEVELS );
+		// Quantization may pick off-white/off-black: snap the lightest entry to pure white, darkest to pure black.
+		$total = imagecolorstotal( $image );
+		$light = 0; $dark = 0; $lv = -1; $dv = 999;
+		for ( $i = 0; $i < $total; $i++ ) {
+			$c = imagecolorsforindex( $image, $i );
+			$v = ( $c['red'] + $c['green'] + $c['blue'] ) / 3;
+			if ( $v > $lv ) { $lv = $v; $light = $i; }
+			if ( $v < $dv ) { $dv = $v; $dark = $i; }
+		}
+		imagecolorset( $image, $light, 255, 255, 255 );
+		if ( $dark !== $light ) {
+			imagecolorset( $image, $dark, 0, 0, 0 );
+		}
+		ob_start();
+		imagepng( $image, null, 9 );
+		return ob_get_clean();
+	}
+
+	/** Metadata without intermediate sizes: these cards are only ever shown full size. */
+	private static function plain_metadata( $file, $width, $height ) {
+		return array(
+			'width'    => (int) $width,
+			'height'   => (int) $height,
+			'file'     => _wp_relative_upload_path( $file ),
+			'filesize' => (int) @filesize( $file ),
+			'sizes'    => array(),
+		);
+	}
+
+	/**
+	 * One-time background job (WP-Cron, ~40 s per run): for every old PNG card
+	 * delete its unused resized copies and recompress the original in place
+	 * (same file name, so posts keep working). Marks each attachment as done.
+	 */
+	public static function cleanup_batch() {
+		global $wpdb;
+		if ( get_transient( 't2i_cleanup_lock' ) ) {
+			return;
+		}
+		set_transient( 't2i_cleanup_lock', 1, 120 );
+		if ( function_exists( 'wp_raise_memory_limit' ) ) {
+			wp_raise_memory_limit( 'image' );
+		}
+		$start = microtime( true );
+		$stats = get_option( 't2i_cleanup_stats', array( 'files' => 0, 'thumbs' => 0, 'bytes_before' => 0, 'bytes_after' => 0, 'thumb_bytes' => 0 ) );
+		$ids = $wpdb->get_col(
+			"SELECT f.post_id FROM {$wpdb->postmeta} f
+			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized'
+			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%.png'
+			   AND m.meta_id IS NULL
+			 ORDER BY f.post_id LIMIT 300"
+		);
+		// Also repair cards whose attached file is WordPress' '-scaled' copy: posts use the original file.
+		$scaled = $wpdb->get_col(
+			"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file'
+			   AND meta_value LIKE '%text-to-image-%-scaled.png' LIMIT 300"
+		);
+		$ids = array_values( array_unique( array_merge( array_map( 'intval', (array) $scaled ), array_map( 'intval', (array) $ids ) ) ) );
+		if ( empty( $ids ) ) {
+			update_option( 't2i_cleanup_done', gmdate( 'c' ), false );
+			wp_clear_scheduled_hook( 't2i_cleanup_batch' );
+			delete_transient( 't2i_cleanup_lock' );
+			return;
+		}
+		foreach ( $ids as $id ) {
+			if ( microtime( true ) - $start > self::CLEANUP_BATCH_SECONDS ) {
+				break;
+			}
+			// Mark first: if PHP dies on this image (memory/time), the next run skips it instead of looping.
+			update_post_meta( $id, '_t2i_optimized', 0 );
+			$stats['last_id'] = (int) $id;
+			update_option( 't2i_cleanup_stats', $stats, false );
+			$file = get_attached_file( $id );
+			$meta = wp_get_attachment_metadata( $id );
+			// The image used in posts is the original upload; '-scaled' is an extra copy made by WordPress.
+			if ( $file && preg_match( '/-scaled\.png$/', $file ) ) {
+				$orig = preg_replace( '/-scaled\.png$/', '.png', $file );
+				if ( file_exists( $orig ) ) {
+					if ( file_exists( $file ) ) {
+						$stats['thumb_bytes'] += (int) filesize( $file );
+						if ( @unlink( $file ) ) {
+							$stats['thumbs']++;
+						}
+					}
+					update_attached_file( $id, $orig );
+					$file = $orig;
+				}
+			}
+			if ( $file && is_array( $meta ) && ! empty( $meta['sizes'] ) ) {
+				$dir = dirname( $file );
+				foreach ( $meta['sizes'] as $size ) {
+					if ( empty( $size['file'] ) || false === strpos( $size['file'], 'text-to-image-' ) ) {
+						continue;
+					}
+					$path = $dir . '/' . basename( $size['file'] );
+					if ( file_exists( $path ) ) {
+						$stats['thumb_bytes'] += (int) filesize( $path );
+						if ( @unlink( $path ) ) {
+							$stats['thumbs']++;
+						}
+					}
+				}
+			}
+			$width = isset( $meta['width'] ) ? $meta['width'] : 0;
+			$height = isset( $meta['height'] ) ? $meta['height'] : 0;
+			if ( $file && file_exists( $file ) && function_exists( 'imagecreatefrompng' ) ) {
+				$before = (int) filesize( $file );
+				$image  = @imagecreatefrompng( $file );
+				if ( $image ) {
+					$width  = imagesx( $image );
+					$height = imagesy( $image );
+					$png    = self::to_gray_png( $image );
+					imagedestroy( $image );
+					if ( $png && strlen( $png ) < $before ) {
+						$tmp = $file . '.t2itmp';
+						if ( false !== file_put_contents( $tmp, $png ) && @rename( $tmp, $file ) ) {
+							$stats['bytes_before'] += $before;
+							$stats['bytes_after']  += strlen( $png );
+						} else {
+							@unlink( $tmp );
+						}
+					}
+				}
+				$stats['files']++;
+			}
+			if ( $file ) {
+				wp_update_attachment_metadata( $id, self::plain_metadata( $file, $width, $height ) );
+			}
+			update_post_meta( $id, '_t2i_optimized', 1 );
+		}
+		update_option( 't2i_cleanup_stats', $stats, false );
+		delete_transient( 't2i_cleanup_lock' );
+	}
+
+	/** A deterministic manual fallback, also useful for already-published posts. */
+	public static function add_process_metabox() {
+		add_meta_box( 't2i-process-post', __( 'Text to Image API', 'text-to-image-api' ), array( __CLASS__, 'render_process_metabox' ), 'post', 'side', 'high' );
+	}
+
+	public static function render_process_metabox( $post ) {
+		if ( ! $post instanceof WP_Post ) {
+			return;
+		}
+		$error = (string) get_post_meta( $post->ID, '_text_to_image_api_error', true );
+		if ( '' !== $error ) {
+			echo '<p style="color:#b32d2e">' . esc_html( $error ) . '</p>';
+		}
+		echo '<p>' . esc_html__( 'Converts the current .imgjs1 and .nextjs1 blocks into Media Library images immediately.', 'text-to-image-api' ) . '</p>';
+		$url = wp_nonce_url(
+			add_query_arg(
+				array(
+					'action'  => 't2i_process_post',
+					'post_id' => (int) $post->ID,
+				),
+				admin_url( 'admin-post.php' )
+			),
+			't2i_process_post_' . $post->ID
+		);
+		echo '<p><a class="button button-primary" href="' . esc_url( $url ) . '">' . esc_html__( 'Convert marked blocks now', 'text-to-image-api' ) . '</a></p>';
+		$refresh_url = wp_nonce_url(
+			add_query_arg(
+				array(
+					'action'  => 't2i_refresh_next_cards',
+					'post_id' => (int) $post->ID,
+				),
+				admin_url( 'admin-post.php' )
+			),
+			't2i_refresh_next_cards_' . $post->ID
+		);
+		echo '<p><a class="button" href="' . esc_url( $refresh_url ) . '">' . esc_html__( 'Refresh CTA card design', 'text-to-image-api' ) . '</a></p>';
+	}
+
+	public static function process_post_from_admin() {
+		$post_id = isset( $_REQUEST['post_id'] ) ? absint( $_REQUEST['post_id'] ) : 0;
+		if ( ! $post_id || ! current_user_can( 'edit_post', $post_id ) ) {
+			wp_die( esc_html__( 'You do not have permission to process this post.', 'text-to-image-api' ) );
+		}
+		check_admin_referer( 't2i_process_post_' . $post_id );
+		$result = self::convert_post_by_id( $post_id );
+		$args   = is_wp_error( $result ) ? array( 't2i_error' => rawurlencode( $result->get_error_message() ) ) : array( 't2i_processed' => '1' );
+		$target = add_query_arg( $args, admin_url( 'post.php?post=' . $post_id . '&action=edit' ) );
+		wp_safe_redirect( $target );
+		exit;
+	}
+
+	/** Rebuild already-rendered .nextjs1 cards when the CTA design is updated. */
+	public static function refresh_next_cards_from_admin() {
+		$post_id = isset( $_REQUEST['post_id'] ) ? absint( $_REQUEST['post_id'] ) : 0;
+		if ( ! $post_id || ! current_user_can( 'edit_post', $post_id ) ) {
+			wp_die( esc_html__( 'You do not have permission to process this post.', 'text-to-image-api' ) );
+		}
+		check_admin_referer( 't2i_refresh_next_cards_' . $post_id );
+		$result = self::refresh_next_cards_by_post_id( $post_id );
+		$args   = is_wp_error( $result ) ? array( 't2i_error' => rawurlencode( $result->get_error_message() ) ) : array( 't2i_cards_refreshed' => '1' );
+		wp_safe_redirect( add_query_arg( $args, admin_url( 'post.php?post=' . $post_id . '&action=edit' ) ) );
+		exit;
+	}
+
+	/** Convert marked post HTML before it is stored, including standard REST POSTs. */
+	public static function convert_before_post_insert( $data, $postarr ) {
+		if ( self::$is_processing_blocks || empty( $data['post_content'] ) || 'post' !== ( $data['post_type'] ?? 'post' ) ) {
+			return $data;
+		}
+		$content = wp_unslash( (string) $data['post_content'] );
+		if ( false === strpos( $content, 'imgjs1' ) && false === strpos( $content, 'nextjs1' ) ) {
+			return $data;
+		}
+		$post_id = isset( $postarr['ID'] ) ? (int) $postarr['ID'] : 0;
+		$output  = self::replace_protected_blocks( $content, $post_id );
+		if ( is_wp_error( $output ) ) {
+			// Do not block publishing because the existing source text is safer than
+			// losing the whole post. The save hook records the same error for updates.
+			return $data;
+		}
+		$data['post_content'] = wp_slash( $output );
+		return $data;
+	}
+
+	/** Ensure REST API publications are converted after their final content is stored. */
+	public static function process_rest_protected_blocks( $post, $request, $creating ) {
+		if ( ! $post instanceof WP_Post ) {
+			return;
+		}
+		self::process_protected_blocks( $post->ID, $post, ! $creating );
+	}
+
+	/** Add a one-click, on-demand update path next to this plugin in wp-admin. */
+	public static function add_github_update_link( $links ) {
+		if ( ! current_user_can( 'update_plugins' ) ) {
+			return $links;
+		}
+		$url     = wp_nonce_url( admin_url( 'admin-post.php?action=t2i_update_from_github' ), 't2i_update_from_github' );
+		$links[] = '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Update from GitHub', 'text-to-image-api' ) . '</a>';
+		return $links;
+	}
+
+	/** Download and install the latest public GitHub release immediately. */
+	public static function update_from_github() {
+		if ( ! current_user_can( 'update_plugins' ) ) {
+			wp_die( esc_html__( 'You do not have permission to update plugins.', 'text-to-image-api' ) );
+		}
+		check_admin_referer( 't2i_update_from_github' );
+
+		delete_site_transient( 't2i_github_release' );
+		delete_site_transient( 'update_plugins' );
+		require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+		require_once ABSPATH . 'wp-admin/includes/update.php';
+		wp_update_plugins();
+
+		$upgrader = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$result   = $upgrader->upgrade( plugin_basename( __FILE__ ) );
+		$message  = is_wp_error( $result ) ? $result->get_error_message() : ( $result ? __( 'Text to Image API was updated from GitHub.', 'text-to-image-api' ) : __( 'GitHub did not provide a newer plugin release.', 'text-to-image-api' ) );
+		set_transient( 't2i_update_notice_' . get_current_user_id(), $message, MINUTE_IN_SECONDS );
+
+		wp_safe_redirect( admin_url( 'plugins.php' ) );
+		exit;
+	}
+
+	public static function render_update_notice() {
+		$message = get_transient( 't2i_update_notice_' . get_current_user_id() );
+		if ( false === $message ) {
+			return;
+		}
+		delete_transient( 't2i_update_notice_' . get_current_user_id() );
+		echo '<div class="notice notice-info is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 	}
 
 	/** Settings are deliberately kept in WordPress, never in the post or repository. */
@@ -197,6 +529,11 @@ final class Text_To_Image_API {
 	}
 
 	public static function register_routes() {
+		register_rest_route( self::REST_NAMESPACE, '/cleanup', array(
+			'methods'             => array( 'GET', 'POST' ),
+			'permission_callback' => '__return_true',
+			'callback'            => array( __CLASS__, 'cleanup_rest' ),
+		) );
 		register_rest_route(
 			self::REST_NAMESPACE,
 			'/translate',
@@ -218,6 +555,25 @@ final class Text_To_Image_API {
 				),
 			)
 		);
+		register_rest_route(
+			self::REST_NAMESPACE,
+			'/process-post/(?P<id>\\d+)',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( __CLASS__, 'process_post_rest' ),
+				'permission_callback' => array( __CLASS__, 'allow_post_processing_request' ),
+			)
+		);
+	}
+
+	public static function allow_post_processing_request( WP_REST_Request $request ) {
+		return current_user_can( 'edit_post', (int) $request['id'] );
+	}
+
+	public static function process_post_rest( WP_REST_Request $request ) {
+		$post_id = (int) $request['id'];
+		$result  = self::convert_post_by_id( $post_id );
+		return is_wp_error( $result ) ? $result : rest_ensure_response( array( 'post_id' => $post_id, 'processed' => true ) );
 	}
 
 	/** Limit public requests so the translation endpoint cannot be used as an open proxy. */
@@ -283,6 +639,112 @@ final class Text_To_Image_API {
 		update_post_meta( $post_id, '_text_to_image_api_processed_at', current_time( 'mysql', true ) );
 	}
 
+	/** Process one post directly, independent of WordPress save-hook ordering. */
+	private static function convert_post_by_id( $post_id ) {
+		$post = get_post( $post_id );
+		if ( ! $post instanceof WP_Post || 'post' !== $post->post_type ) {
+			return new WP_Error( 'invalid_post', __( 'Post not found.', 'text-to-image-api' ), array( 'status' => 404 ) );
+		}
+		if ( false === strpos( $post->post_content, 'imgjs1' ) && false === strpos( $post->post_content, 'nextjs1' ) ) {
+			return new WP_Error( 'no_marked_blocks', __( 'This post has no unprocessed .imgjs1 or .nextjs1 blocks.', 'text-to-image-api' ), array( 'status' => 400 ) );
+		}
+		$output = self::replace_protected_blocks( $post->post_content, $post_id );
+		if ( is_wp_error( $output ) ) {
+			update_post_meta( $post_id, '_text_to_image_api_error', $output->get_error_message() );
+			return $output;
+		}
+		self::$is_processing_blocks = true;
+		$result = wp_update_post( array( 'ID' => $post_id, 'post_content' => $output ), true );
+		self::$is_processing_blocks = false;
+		if ( is_wp_error( $result ) ) {
+			update_post_meta( $post_id, '_text_to_image_api_error', $result->get_error_message() );
+			return $result;
+		}
+		delete_post_meta( $post_id, '_text_to_image_api_error' );
+		update_post_meta( $post_id, '_text_to_image_api_processed_at', current_time( 'mysql', true ) );
+		return true;
+	}
+
+	/** Re-render CTA SVGs while retaining their original multilingual text. */
+	private static function refresh_next_cards_by_post_id( $post_id ) {
+		$post = get_post( $post_id );
+		if ( ! $post instanceof WP_Post || 'post' !== $post->post_type ) {
+			return new WP_Error( 'invalid_post', __( 'Post not found.', 'text-to-image-api' ), array( 'status' => 404 ) );
+		}
+		if ( ! class_exists( 'DOMDocument' ) ) {
+			return new WP_Error( 'dom_missing', __( 'The PHP DOM extension is required to refresh CTA cards.', 'text-to-image-api' ), array( 'status' => 500 ) );
+		}
+
+		$previous_errors = libxml_use_internal_errors( true );
+		$document        = new DOMDocument( '1.0', 'UTF-8' );
+		$document->loadHTML( '<?xml encoding="utf-8" ?><div id="text-to-image-api-root">' . $post->post_content . '</div>', LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD );
+		libxml_clear_errors();
+		libxml_use_internal_errors( $previous_errors );
+		$root = $document->getElementById( 'text-to-image-api-root' );
+		if ( ! $root ) {
+			return new WP_Error( 'invalid_html', __( 'CTA cards could not be read from this post.', 'text-to-image-api' ), array( 'status' => 400 ) );
+		}
+
+		$cards = array();
+		foreach ( $document->getElementsByTagName( '*' ) as $node ) {
+			if ( self::is_next_node( $node ) && '1' === $node->getAttribute( 'data-t2i-rendered' ) ) {
+				$cards[] = $node;
+			}
+		}
+		if ( ! $cards ) {
+			return new WP_Error( 'no_rendered_cards', __( 'This post has no rendered CTA cards to refresh.', 'text-to-image-api' ), array( 'status' => 400 ) );
+		}
+
+		foreach ( $cards as $index => $card ) {
+			$source = '';
+			$image  = null;
+			foreach ( $card->getElementsByTagName( 'img' ) as $candidate ) {
+				$image  = $candidate;
+				$source = (string) $candidate->getAttribute( 'src' );
+				break;
+			}
+			$text = self::extract_next_card_text_from_svg( $source );
+			if ( '' === $text || ! $image ) {
+				return new WP_Error( 'card_text_missing', __( 'The original CTA text could not be recovered.', 'text-to-image-api' ), array( 'status' => 500 ) );
+			}
+			$new_url = self::create_next_svg_media_image( $text, $index, $post_id );
+			if ( is_wp_error( $new_url ) ) {
+				return $new_url;
+			}
+			$image->setAttribute( 'src', $new_url );
+		}
+
+		self::$is_processing_blocks = true;
+		$result = wp_update_post( array( 'ID' => $post_id, 'post_content' => self::inner_html( $root ) ), true );
+		self::$is_processing_blocks = false;
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+		delete_post_meta( $post_id, '_text_to_image_api_error' );
+		return true;
+	}
+
+	/** Read the label from the previous SVG stored in the Media Library. */
+	private static function extract_next_card_text_from_svg( $url ) {
+		$attachment_id = attachment_url_to_postid( $url );
+		$file          = $attachment_id ? get_attached_file( $attachment_id ) : '';
+		if ( ! $file || ! is_readable( $file ) ) {
+			return '';
+		}
+		$svg = file_get_contents( $file ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		if ( false === $svg || ! preg_match_all( '/<tspan\\b[^>]*>(.*?)<\\/tspan>/si', $svg, $matches ) ) {
+			return '';
+		}
+		$lines = array();
+		foreach ( $matches[1] as $line ) {
+			$line = trim( html_entity_decode( wp_strip_all_tags( $line ), ENT_QUOTES | ENT_XML1, 'UTF-8' ) );
+			if ( '' !== $line ) {
+				$lines[] = $line;
+			}
+		}
+		return implode( "\n", $lines );
+	}
+
 	private static function replace_protected_blocks( $content, $post_id ) {
 		if ( ! class_exists( 'DOMDocument' ) ) {
 			return new WP_Error( 'dom_missing', __( 'The PHP DOM extension is required to convert protected blocks.', 'text-to-image-api' ), array( 'status' => 500 ) );
@@ -308,7 +770,9 @@ final class Text_To_Image_API {
 
 		$image_index = 0;
 		foreach ( $nodes as $node ) {
-			$text = trim( preg_replace( '/\s+/u', ' ', (string) $node->textContent ) );
+			$is_next      = self::is_next_node( $node );
+			$decorations = self::extract_decorative_children( $node );
+			$text = self::extract_text_with_breaks( $node );
 			if ( '' === $text ) {
 				continue;
 			}
@@ -316,9 +780,13 @@ final class Text_To_Image_API {
 			while ( $node->firstChild ) {
 				$node->removeChild( $node->firstChild );
 			}
+			foreach ( $decorations['before'] as $decoration ) {
+				$node->appendChild( $decoration );
+			}
+
 			$parts = self::split_text_for_images( $text );
 			foreach ( $parts as $part ) {
-				$image_url = self::create_media_image( $part, $image_index, $post_id );
+				$image_url = self::create_media_image( $part, $image_index, $post_id, $is_next );
 				if ( is_wp_error( $image_url ) ) {
 					return $image_url;
 				}
@@ -331,11 +799,97 @@ final class Text_To_Image_API {
 				$node->appendChild( $image );
 				$image_index++;
 			}
-
+			foreach ( $decorations['after'] as $decoration ) {
+				$node->appendChild( $decoration );
+			}
 			$node->setAttribute( 'data-t2i-rendered', '1' );
 		}
 
 		return self::inner_html( $root );
+	}
+
+	/** Preserve author paragraph and line breaks when HTML is rendered to an image. */
+	private static function extract_text_with_breaks( DOMNode $node ) {
+		$block_tags = array( 'address', 'article', 'blockquote', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'p', 'section' );
+		$text       = '';
+		foreach ( $node->childNodes as $child ) {
+			if ( XML_TEXT_NODE === $child->nodeType ) {
+				$text .= $child->nodeValue;
+				continue;
+			}
+			if ( ! $child instanceof DOMElement ) {
+				continue;
+			}
+			$tag = strtolower( $child->tagName );
+			if ( 'br' === $tag ) {
+				$text .= "\n";
+				continue;
+			}
+			$text .= self::extract_text_with_breaks( $child );
+			if ( in_array( $tag, $block_tags, true ) ) {
+				$text .= "\n\n";
+			}
+		}
+
+		$text = str_replace( array( "\r\n", "\r" ), "\n", $text );
+		$text = preg_replace( '/[^\S\n]+/u', ' ', $text );
+		$text = preg_replace( '/ *\n */u', "\n", $text );
+		$text = preg_replace( '/\n{3,}/u', "\n\n", $text );
+		return trim( (string) $text );
+	}
+
+	/** Keep visual controls (arrows, icons, SVG) while replacing only readable text. */
+	private static function extract_decorative_children( DOMElement $node ) {
+		$before       = array();
+		$after        = array();
+		$seen_content = false;
+		self::collect_decorative_nodes( $node, $before, $after, $seen_content );
+
+		return array( 'before' => $before, 'after' => $after );
+	}
+
+	/** Find decorative nodes at any depth, including arrows wrapped inside text tags. */
+	private static function collect_decorative_nodes( DOMNode $parent, &$before, &$after, &$seen_content ) {
+		$children = array();
+		foreach ( $parent->childNodes as $child ) {
+			$children[] = $child;
+		}
+		foreach ( $children as $child ) {
+			if ( self::is_decorative_node( $child ) ) {
+				$copy = $child->cloneNode( true );
+				if ( $seen_content ) {
+					$after[] = $copy;
+				} else {
+					$before[] = $copy;
+				}
+				$parent->removeChild( $child );
+				continue;
+			}
+			if ( XML_TEXT_NODE === $child->nodeType ) {
+				if ( '' !== trim( (string) $child->nodeValue ) ) {
+					$seen_content = true;
+				}
+				continue;
+			}
+			if ( $child instanceof DOMElement ) {
+				self::collect_decorative_nodes( $child, $before, $after, $seen_content );
+			}
+		}
+	}
+
+	private static function is_decorative_node( DOMNode $node ) {
+		if ( ! $node instanceof DOMElement ) {
+			return false;
+		}
+		$tag     = strtolower( $node->tagName );
+		$class   = (string) $node->getAttribute( 'class' );
+		$text    = trim( (string) $node->textContent );
+		$is_icon = in_array( $tag, array( 'img', 'svg', 'canvas', 'video' ), true ) || $node->hasAttribute( 'data-t2i-keep' );
+		if ( $is_icon || preg_match( '/(?:arrow|icon|ornament|decor)/i', $class ) ) {
+			return true;
+		}
+		// Covers spans containing only glyph arrows such as ↓, ➜ or ❯.
+		return '' !== $text && (bool) preg_match( '/^[\s\p{So}\p{Sm}\p{Sk}\p{P}]+$/u', $text );
 	}
 
 	private static function is_protected_node( DOMNode $node ) {
@@ -344,6 +898,46 @@ final class Text_To_Image_API {
 		}
 		$classes = preg_split( '/\s+/', trim( (string) $node->getAttribute( 'class' ) ) );
 		return (bool) array_intersect( array( 'imgjs1', 'nextjs1' ), (array) $classes );
+	}
+
+	private static function is_next_node( DOMNode $node ) {
+		return $node instanceof DOMElement && in_array( 'nextjs1', (array) preg_split( '/\s+/', trim( (string) $node->getAttribute( 'class' ) ) ), true );
+	}
+
+	private static function has_arrow_decoration( DOMNode $node ) {
+		if ( self::is_decorative_node( $node ) && ( $node instanceof DOMElement && preg_match( '/arrow/i', (string) $node->getAttribute( 'class' ) ) ) ) {
+			return true;
+		}
+		foreach ( $node->childNodes as $child ) {
+			if ( self::has_arrow_decoration( $child ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static function create_auto_arrow( DOMDocument $document ) {
+		$arrow = $document->createElement( 'div' );
+		$arrow->setAttribute( 'class', 't2i-auto-arrow' );
+		$arrow->setAttribute( 'aria-hidden', 'true' );
+		$arrow->setAttribute( 'style', 'display:flex;justify-content:center;margin:4px auto 16px;line-height:0;' );
+		$svg = $document->createElementNS( 'http://www.w3.org/2000/svg', 'svg' );
+		$svg->setAttribute( 'width', '54' );
+		$svg->setAttribute( 'height', '36' );
+		$svg->setAttribute( 'viewBox', '0 0 54 36' );
+		$svg->setAttribute( 'fill', 'none' );
+		$svg->setAttribute( 'aria-hidden', 'true' );
+		foreach ( array( 'M9 5l18 14L45 5', 'M9 17l18 14 18-14' ) as $path_data ) {
+			$path = $document->createElementNS( 'http://www.w3.org/2000/svg', 'path' );
+			$path->setAttribute( 'd', $path_data );
+			$path->setAttribute( 'stroke', '#ff2020' );
+			$path->setAttribute( 'stroke-width', '5' );
+			$path->setAttribute( 'stroke-linecap', 'round' );
+			$path->setAttribute( 'stroke-linejoin', 'round' );
+			$svg->appendChild( $path );
+		}
+		$arrow->appendChild( $svg );
+		return $arrow;
 	}
 
 	private static function has_protected_ancestor( DOMNode $node ) {
@@ -358,24 +952,24 @@ final class Text_To_Image_API {
 	}
 
 	private static function split_text_for_images( $text ) {
-		$sentences = preg_split( '/(?<=[.!?])\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY );
+		$paragraphs = preg_split( '/\n{2,}/u', trim( $text ), -1, PREG_SPLIT_NO_EMPTY );
 		$parts     = array();
 		$current   = '';
-		foreach ( $sentences as $sentence ) {
-			$sentence = trim( $sentence );
-			if ( self::text_length( $sentence ) > self::MAX_BLOCK_TEXT_LENGTH ) {
+		foreach ( $paragraphs as $paragraph ) {
+			$paragraph = trim( $paragraph );
+			if ( self::text_length( $paragraph ) > self::MAX_BLOCK_TEXT_LENGTH ) {
 				if ( '' !== $current ) {
 					$parts[] = $current;
 					$current = '';
 				}
-				$parts = array_merge( $parts, self::hard_split_text( $sentence ) );
+				$parts = array_merge( $parts, self::hard_split_text( $paragraph ) );
 				continue;
 			}
-			if ( '' !== $current && self::text_length( $current . ' ' . $sentence ) > self::MAX_BLOCK_TEXT_LENGTH ) {
+			if ( '' !== $current && self::text_length( $current . "\n\n" . $paragraph ) > self::MAX_BLOCK_TEXT_LENGTH ) {
 				$parts[] = $current;
 				$current = '';
 			}
-			$current = trim( $current . ' ' . $sentence );
+			$current = '' === $current ? $paragraph : $current . "\n\n" . $paragraph;
 		}
 		if ( '' !== $current ) {
 			$parts[] = $current;
@@ -632,15 +1226,21 @@ final class Text_To_Image_API {
 	}
 
 	/** Create a permanent Media Library file instead of a temporary preview URL. */
-	private static function create_media_image( $text, $index, $post_id = 0 ) {
+	private static function create_media_image( $text, $index, $post_id = 0, $is_next = false ) {
+		if ( $is_next ) {
+			return self::create_next_svg_media_image( $text, $index, $post_id );
+		}
+		if ( self::requires_svg_renderer( $text ) ) {
+			return self::create_svg_media_image( $text, $index, $post_id );
+		}
 		if ( ! function_exists( 'imagecreatetruecolor' ) || ! function_exists( 'imagepng' ) ) {
 			return new WP_Error( 'gd_missing', __( 'The PHP GD extension is required to generate images.', 'text-to-image-api' ), array( 'status' => 500 ) );
 		}
 
-		$image = self::create_image_resource( $text, $index );
-		ob_start();
-		imagepng( $image );
-		$png = ob_get_clean();
+		$image  = self::create_image_resource( $text, $index );
+		$img_w  = imagesx( $image );
+		$img_h  = imagesy( $image );
+		$png    = self::to_gray_png( $image );
 		imagedestroy( $image );
 		if ( empty( $png ) ) {
 			return new WP_Error( 'image_generation_failed', __( 'The image could not be generated.', 'text-to-image-api' ), array( 'status' => 500 ) );
@@ -665,9 +1265,188 @@ final class Text_To_Image_API {
 			return $attachment_id;
 		}
 
-		require_once ABSPATH . 'wp-admin/includes/image.php';
-		wp_update_attachment_metadata( $attachment_id, wp_generate_attachment_metadata( $attachment_id, $upload['file'] ) );
-		return wp_get_attachment_url( $attachment_id );
+		// No resized copies: cards are only shown full size (saves ~88% disk and CPU on publish).
+		wp_update_attachment_metadata( $attachment_id, self::plain_metadata( $upload['file'], $img_w, $img_h ) );
+		update_post_meta( $attachment_id, '_t2i_optimized', 1 );
+		// Some sites filter wp_get_attachment_url() into an attachment-post permalink.
+		// The upload result is the original, direct PNG URL and must be used in <img src>.
+		return esc_url_raw( $upload['url'] );
+	}
+
+	/** Render a .nextjs1 block as a clean, large-type CTA card. */
+	private static function create_next_svg_media_image( $text, $index, $post_id = 0 ) {
+		$width     = 1200;
+		$font_size = 76;
+		$line_step = 112;
+		$lines     = self::wrap_text_for_svg( $text, 20 );
+		$height    = max( 320, 150 + ( $line_step * count( $lines ) ) );
+		$font_file = self::svg_font_file( $text );
+		$font_url  = 'NotoSansFull.ttf' === $font_file
+			? plugins_url( $font_file, __FILE__ )
+			: plugins_url( 'fonts/' . $font_file, __FILE__ );
+		$spans     = '';
+		$y         = max( 110, (int) ( ( $height - ( $line_step * ( count( $lines ) - 1 ) ) ) / 2 ) );
+		foreach ( $lines as $line ) {
+			if ( '' !== $line ) {
+				$spans .= '<tspan x="600" y="' . (int) $y . '">' . esc_html( $line ) . '</tspan>';
+			}
+			$y += $line_step;
+		}
+
+		$svg = '<?xml version="1.0" encoding="UTF-8"?>'
+			. '<svg xmlns="http://www.w3.org/2000/svg" width="' . (int) $width . '" height="' . (int) $height . '" viewBox="0 0 ' . (int) $width . ' ' . (int) $height . '">'
+			. '<defs><style>@font-face{font-family:T2I;src:url(' . esc_url( $font_url ) . ') format("truetype");}</style></defs>'
+			. '<rect width="100%" height="100%" fill="#fff"/>'
+			. '<text xml:space="preserve" x="600" y="120" fill="#ff3030" font-family="T2I, sans-serif" font-size="' . (int) $font_size . '" font-weight="800" text-anchor="middle">' . $spans . '</text>'
+			. '</svg>';
+
+		$filename = 'text-to-image-next-' . gmdate( 'Ymd-His' ) . '-' . wp_generate_password( 8, false, false ) . '.svg';
+		$upload   = self::upload_generated_svg( $filename, $svg );
+		if ( ! empty( $upload['error'] ) ) {
+			return new WP_Error( 'media_upload_failed', $upload['error'], array( 'status' => 500 ) );
+		}
+		$attachment_id = wp_insert_attachment(
+			array(
+				'post_mime_type' => 'image/svg+xml',
+				'post_title'     => sprintf( __( 'Protected text CTA %d', 'text-to-image-api' ), $index + 1 ),
+				'post_status'    => 'inherit',
+			),
+			$upload['file'],
+			(int) $post_id
+		);
+		if ( is_wp_error( $attachment_id ) ) {
+			return $attachment_id;
+		}
+		return esc_url_raw( $upload['url'] );
+	}
+
+	/**
+	 * GD/FreeType cannot shape Arabic, Indic and several other complex scripts.
+	 * SVG is rendered by the visitor's browser shaping engine, giving correct glyph
+	 * joining and positioning while remaining a responsive image element.
+	 */
+	private static function requires_svg_renderer( $text ) {
+		return (bool) preg_match( '/[\x{0530}-\x{058F}\x{0590}-\x{08FF}\x{0900}-\x{0DFF}\x{1000}-\x{109F}\x{1200}-\x{139F}\x{1780}-\x{17FF}\x{1800}-\x{18AF}\x{2E80}-\x{9FFF}]/u', $text );
+	}
+
+	private static function create_svg_media_image( $text, $index, $post_id = 0 ) {
+		$width     = 1200;
+		$padding   = 50;
+		$font_size = 32;
+		$line_step = 68;
+		$lines     = self::wrap_text_for_svg( $text, 40 );
+		$height    = max( 180, $line_step * count( $lines ) + 100 );
+		$rtl       = (bool) preg_match( '/[\x{0590}-\x{08FF}]/u', $text );
+		$x         = $rtl ? $width - $padding : $padding;
+		$anchor    = $rtl ? 'end' : 'start';
+		$direction = $rtl ? 'rtl' : 'ltr';
+		$font_file = self::svg_font_file( $text );
+		$font_url  = 'NotoSansFull.ttf' === $font_file
+			? plugins_url( $font_file, __FILE__ )
+			: plugins_url( 'fonts/' . $font_file, __FILE__ );
+		$spans     = '';
+		$y         = 70;
+		foreach ( $lines as $line ) {
+			if ( '' !== $line ) {
+				$spans .= '<tspan x="' . (int) $x . '" y="' . (int) $y . '">' . esc_html( $line ) . '</tspan>';
+			}
+			$y += $line_step;
+		}
+		$svg = '<?xml version="1.0" encoding="UTF-8"?>'
+			. '<svg xmlns="http://www.w3.org/2000/svg" width="' . (int) $width . '" height="' . (int) $height . '" viewBox="0 0 ' . (int) $width . ' ' . (int) $height . '">'
+			. '<style>@font-face{font-family:T2I;src:url(' . esc_url( $font_url ) . ') format("truetype");}</style>'
+			. '<rect width="100%" height="100%" fill="#ffffff"/>'
+			. '<text xml:space="preserve" x="' . (int) $x . '" y="70" fill="#111111" font-family="T2I, sans-serif" font-size="' . (int) $font_size . '" direction="' . $direction . '" unicode-bidi="plaintext" text-anchor="' . $anchor . '">' . $spans . '</text>'
+			. '</svg>';
+
+		$filename = 'text-to-image-' . gmdate( 'Ymd-His' ) . '-' . wp_generate_password( 8, false, false ) . '.svg';
+		$upload   = self::upload_generated_svg( $filename, $svg );
+		if ( ! empty( $upload['error'] ) ) {
+			return new WP_Error( 'media_upload_failed', $upload['error'], array( 'status' => 500 ) );
+		}
+		$attachment_id = wp_insert_attachment(
+			array(
+				'post_mime_type' => 'image/svg+xml',
+				'post_title'     => sprintf( __( 'Protected text image %d', 'text-to-image-api' ), $index + 1 ),
+				'post_status'    => 'inherit',
+			),
+			$upload['file'],
+			(int) $post_id
+		);
+		if ( is_wp_error( $attachment_id ) ) {
+			return $attachment_id;
+		}
+
+		return esc_url_raw( $upload['url'] );
+	}
+
+	/**
+	 * wp_upload_bits() validates file extensions against the site's allowed MIME
+	 * list. SVG is intentionally absent from WordPress defaults, but these files
+	 * are generated by this plugin itself, not supplied by an editor. Temporarily
+	 * enabling it here lets complex-language and CTA cards reach the Media Library
+	 * without opening ordinary editor uploads to SVG files.
+	 */
+	private static function upload_generated_svg( $filename, $svg ) {
+		add_filter( 'upload_mimes', array( __CLASS__, 'allow_generated_svg_mime' ), 999 );
+		add_filter( 'mime_types', array( __CLASS__, 'allow_generated_svg_mime' ), 999 );
+		$upload = wp_upload_bits( $filename, null, $svg );
+		remove_filter( 'upload_mimes', array( __CLASS__, 'allow_generated_svg_mime' ), 999 );
+		remove_filter( 'mime_types', array( __CLASS__, 'allow_generated_svg_mime' ), 999 );
+		return $upload;
+	}
+
+	public static function allow_generated_svg_mime( $mimes ) {
+		$mimes['svg'] = 'image/svg+xml';
+		return $mimes;
+	}
+
+	/** Select a bundled font for every non-Latin script supported by the pipeline. */
+	private static function svg_font_file( $text ) {
+		$fonts = array(
+			'/[\x{0600}-\x{08FF}]/u' => 'NotoNaskhArabic.ttf', // Farsi, Pashto, Kurdish, Sindhi, Saraiki, Arabic Hausa.
+			'/[\x{1200}-\x{139F}]/u' => 'NotoSansEthiopic.ttf', // Amharic, Tigrinya.
+			'/[\x{0900}-\x{097F}]/u' => 'NotoSansDevanagari.ttf', // Bhojpuri, Maithili, Nepali, Magahi, Chhattisgarhi, Haryanvi.
+			'/[\x{0980}-\x{09FF}]/u' => 'NotoSansBengali.ttf', // Assamese.
+			'/[\x{0B00}-\x{0B7F}]/u' => 'NotoSansOriya.ttf', // Odia.
+			'/[\x{1000}-\x{109F}]/u' => 'NotoSansMyanmar.ttf', // Burmese.
+			'/[\x{0D80}-\x{0DFF}]/u' => 'NotoSansSinhala.ttf', // Sinhala.
+			'/[\x{1780}-\x{17FF}]/u' => 'NotoSansKhmer.ttf', // Khmer.
+			'/[\x{0530}-\x{058F}]/u' => 'NotoSansArmenian.ttf', // Armenian.
+			'/[\x{2E80}-\x{9FFF}]/u' => 'NotoSansSC.ttf', // Zhuang written with Han characters.
+		);
+		foreach ( $fonts as $pattern => $font ) {
+			if ( preg_match( $pattern, $text ) ) {
+				return $font;
+			}
+		}
+		return 'NotoSansFull.ttf';
+	}
+
+	private static function wrap_text_for_svg( $text, $max_characters ) {
+		$lines = array();
+		foreach ( explode( "\n", str_replace( array( "\r\n", "\r" ), "\n", (string) $text ) ) as $paragraph ) {
+			$paragraph = trim( $paragraph );
+			if ( '' === $paragraph ) {
+				$lines[] = '';
+				continue;
+			}
+			$line  = '';
+			$words = preg_split( '/\s+/u', $paragraph, -1, PREG_SPLIT_NO_EMPTY );
+			foreach ( $words as $word ) {
+				$candidate = '' === $line ? $word : $line . ' ' . $word;
+				if ( '' !== $line && self::text_length( $candidate ) > $max_characters ) {
+					$lines[] = $line;
+					$line    = $word;
+				} else {
+					$line = $candidate;
+				}
+			}
+			if ( '' !== $line ) {
+				$lines[] = $line;
+			}
+		}
+		return $lines ? $lines : array( '' );
 	}
 
 	public static function serve_image() {
@@ -691,10 +1470,17 @@ final class Text_To_Image_API {
 	}
 
 	private static function create_image_resource( $text, $index ) {
-		$font_path = plugin_dir_path( __FILE__ ) . 'noto-sans-regular.ttf';
-		$lines     = explode( "\n", wordwrap( $text, 42, "\n", true ) );
-		$width     = 800;
-		$height    = max( 150, 52 * count( $lines ) + 90 );
+		// The original bundled font only covers Latin, Greek and Cyrillic.
+		// Select the Georgian Noto font for Georgian text so GD never renders it as squares.
+		$font_file = preg_match( '/[\x{10A0}-\x{10FF}]/u', $text )
+			? 'NotoSansGeorgian.ttf'
+			: 'NotoSansFull.ttf';
+		$font_path = plugin_dir_path( __FILE__ ) . $font_file;
+		$font_size = 32;
+		$width     = 1200;
+		$padding   = 50;
+		$lines     = self::wrap_text_for_image( $text, $font_path, $font_size, $width - ( $padding * 2 ) );
+		$height    = max( 180, 68 * count( $lines ) + 100 );
 		$image     = imagecreatetruecolor( $width, $height );
 		$white     = imagecolorallocate( $image, 255, 255, 255 );
 		$black     = imagecolorallocate( $image, 0, 0, 0 );
@@ -702,10 +1488,10 @@ final class Text_To_Image_API {
 
 		imagefilledrectangle( $image, 0, 0, $width, $height, $white );
 		if ( file_exists( $font_path ) && function_exists( 'imagettftext' ) ) {
-			$y = 60;
+			$y = 70;
 			foreach ( $lines as $line ) {
-				imagettftext( $image, 24, 0, 40, $y, $black, $font_path, $line );
-				$y += 50;
+				imagettftext( $image, $font_size, 0, $padding, $y, $black, $font_path, $line );
+				$y += 68;
 			}
 		} else {
 			$y = 40;
@@ -716,6 +1502,43 @@ final class Text_To_Image_API {
 		}
 
 		return $image;
+	}
+
+	/**
+	 * Wrap on measured pixel width, never UTF-8 byte length.
+	 * wordwrap() corrupts layout for multibyte scripts such as Georgian.
+	 */
+	private static function wrap_text_for_image( $text, $font_path, $font_size, $max_width ) {
+		if ( ! file_exists( $font_path ) || ! function_exists( 'imagettfbbox' ) ) {
+			return explode( "\n", wordwrap( $text, 90, "\n", true ) );
+		}
+
+		$lines = array();
+		foreach ( explode( "\n", str_replace( array( "\r\n", "\r" ), "\n", (string) $text ) ) as $paragraph ) {
+			$paragraph = trim( $paragraph );
+			if ( '' === $paragraph ) {
+				$lines[] = '';
+				continue;
+			}
+			$line  = '';
+			$words = preg_split( '/\s+/u', $paragraph, -1, PREG_SPLIT_NO_EMPTY );
+			foreach ( $words as $word ) {
+				$candidate = '' === $line ? $word : $line . ' ' . $word;
+				$bounds    = imagettfbbox( $font_size, 0, $font_path, $candidate );
+				$text_width = $bounds ? abs( $bounds[2] - $bounds[0] ) : 0;
+				if ( '' !== $line && $text_width > $max_width ) {
+					$lines[] = $line;
+					$line    = $word;
+				} else {
+					$line = $candidate;
+				}
+			}
+			if ( '' !== $line ) {
+				$lines[] = $line;
+			}
+		}
+
+		return $lines ? $lines : array( '' );
 	}
 
 	private static function render_image( $text, $index ) {
