@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Image Importer Extended
  * Description: Imports the first image in a post received through the REST API and assigns it as the featured image.
- * Version: 9.3.0
+ * Version: 9.3.1
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Image_Importer_Extended {
-	const VERSION      = '9.3.0';
+	const VERSION      = '9.3.1';
 	const MAX_WIDTH    = 500;   // featured images are stored on the site at most 500 px wide
 	const JPEG_QUALITY = 60;
 	const REPO         = 'boxa007/georgian_30lang';
@@ -25,6 +25,10 @@ class Image_Importer_Extended {
 		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'inject_update' ) );
 		add_filter( 'auto_update_plugin', array( $this, 'auto_update' ), 10, 2 );
 		add_filter( 'upgrader_source_selection', array( $this, 'keep_folder_name' ), 10, 4 );
+		/* "Update from GitHub" link in the plugin list: install the newest release right now. */
+		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( $this, 'add_update_link' ) );
+		add_action( 'admin_post_iie_update_from_github', array( $this, 'update_from_github' ) );
+		add_action( 'admin_notices', array( $this, 'render_update_notice' ) );
 		/* One-time background job: shrink featured images that were imported before 9.3.0. */
 		add_filter( 'cron_schedules', array( $this, 'cron_interval' ) );
 		add_action( 'iie_shrink_batch', array( $this, 'shrink_batch' ) );
@@ -393,6 +397,48 @@ class Image_Importer_Extended {
 			$transient->no_update[ $file ] = $item;
 		}
 		return $transient;
+	}
+
+	public function add_update_link( $links ) {
+		if ( current_user_can( 'update_plugins' ) ) {
+			$url     = wp_nonce_url( admin_url( 'admin-post.php?action=iie_update_from_github' ), 'iie_update_from_github' );
+			$links[] = '<a href="' . esc_url( $url ) . '">Update from GitHub</a>';
+		}
+		return $links;
+	}
+
+	public function update_from_github() {
+		if ( ! current_user_can( 'update_plugins' ) ) {
+			wp_die( 'You do not have permission to update plugins.' );
+		}
+		check_admin_referer( 'iie_update_from_github' );
+		delete_site_transient( 'iie_github_release' );
+		delete_site_transient( 'update_plugins' );
+		require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+		require_once ABSPATH . 'wp-admin/includes/update.php';
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		wp_update_plugins();
+		$rel = $this->latest_release();
+		if ( ! $rel || version_compare( $rel['version'], self::VERSION, '<=' ) ) {
+			$message = 'Image Importer Extended ' . self::VERSION . ' is already the newest release on GitHub.';
+		} else {
+			$upgrader = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+			$result   = $upgrader->upgrade( plugin_basename( __FILE__ ) );
+			$message  = is_wp_error( $result ) ? $result->get_error_message()
+				: ( $result ? 'Image Importer Extended was updated from GitHub to ' . $rel['version'] . '.' : 'GitHub update failed.' );
+		}
+		set_transient( 'iie_update_notice_' . get_current_user_id(), $message, MINUTE_IN_SECONDS );
+		wp_safe_redirect( admin_url( 'plugins.php' ) );
+		exit;
+	}
+
+	public function render_update_notice() {
+		$message = get_transient( 'iie_update_notice_' . get_current_user_id() );
+		if ( false === $message ) {
+			return;
+		}
+		delete_transient( 'iie_update_notice_' . get_current_user_id() );
+		echo '<div class="notice notice-info is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 	}
 
 	public function auto_update( $update, $item ) {
