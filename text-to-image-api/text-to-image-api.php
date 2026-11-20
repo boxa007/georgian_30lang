@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.10
+ * Version: 2.4.12
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,9 +12,9 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.10';
+	const VERSION            = '2.4.12';
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
-	const GRAY_LEVELS        = 4;     // black-and-white cards: 4 gray levels keep anti-aliasing, ~4x smaller PNG
+	const GRAY_LEVELS        = 3;     // black-and-white cards: 3 gray levels (white, mid-gray, black), ~4.7x smaller PNG
 	const CLEANUP_BATCH_SECONDS = 40;
 	const REST_NAMESPACE     = 'text-to-image/v1';
 	const GITHUB_REPOSITORY  = 'boxa007/deepseek';
@@ -94,6 +94,9 @@ final class Text_To_Image_API {
 
 	/** Convert a GD image to a small black/white/gray palette PNG binary string. */
 	private static function to_gray_png( $image ) {
+		if ( ! imageistruecolor( $image ) ) {
+			imagepalettetotruecolor( $image );
+		}
 		imagefilter( $image, IMG_FILTER_GRAYSCALE );
 		imagetruecolortopalette( $image, false, self::GRAY_LEVELS );
 		// Quantization may pick off-white/off-black: snap the lightest entry to pure white, darkest to pure black.
@@ -141,17 +144,23 @@ final class Text_To_Image_API {
 		}
 		$start = microtime( true );
 		$stats = get_option( 't2i_cleanup_stats', array( 'files' => 0, 'thumbs' => 0, 'bytes_before' => 0, 'bytes_after' => 0, 'thumb_bytes' => 0 ) );
+		// Unique token: W3 Total Cache's database cache must not return a stale ID list.
+		$nc  = (int) wp_rand( 1, 2000000000 );
+		$done = (string) self::GRAY_LEVELS;
+		$try  = 'try' . self::GRAY_LEVELS;
 		$ids = $wpdb->get_col(
 			"SELECT f.post_id FROM {$wpdb->postmeta} f
-			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized'
+			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$try}')
 			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%.png'
-			   AND m.meta_id IS NULL
+			   AND m.meta_id IS NULL AND {$nc} = {$nc}
 			 ORDER BY f.post_id LIMIT 300"
 		);
 		// Also repair cards whose attached file is WordPress' '-scaled' copy: posts use the original file.
 		$scaled = $wpdb->get_col(
-			"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file'
-			   AND meta_value LIKE '%text-to-image-%-scaled.png' LIMIT 300"
+			"SELECT f.post_id FROM {$wpdb->postmeta} f
+			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = f.post_id AND m.meta_key = '_t2i_optimized' AND m.meta_value IN ('{$done}', '{$try}')
+			 WHERE f.meta_key = '_wp_attached_file' AND f.meta_value LIKE '%text-to-image-%-scaled.png'
+			   AND m.meta_id IS NULL AND {$nc} = {$nc} LIMIT 300"
 		);
 		$ids = array_values( array_unique( array_merge( array_map( 'intval', (array) $scaled ), array_map( 'intval', (array) $ids ) ) ) );
 		if ( empty( $ids ) ) {
@@ -165,7 +174,7 @@ final class Text_To_Image_API {
 				break;
 			}
 			// Mark first: if PHP dies on this image (memory/time), the next run skips it instead of looping.
-			update_post_meta( $id, '_t2i_optimized', 0 );
+			update_post_meta( $id, '_t2i_optimized', $try );
 			$stats['last_id'] = (int) $id;
 			update_option( 't2i_cleanup_stats', $stats, false );
 			$file = get_attached_file( $id );
@@ -224,7 +233,7 @@ final class Text_To_Image_API {
 			if ( $file ) {
 				wp_update_attachment_metadata( $id, self::plain_metadata( $file, $width, $height ) );
 			}
-			update_post_meta( $id, '_t2i_optimized', 1 );
+			update_post_meta( $id, '_t2i_optimized', $done );
 		}
 		update_option( 't2i_cleanup_stats', $stats, false );
 		delete_transient( 't2i_cleanup_lock' );
@@ -1267,7 +1276,7 @@ final class Text_To_Image_API {
 
 		// No resized copies: cards are only shown full size (saves ~88% disk and CPU on publish).
 		wp_update_attachment_metadata( $attachment_id, self::plain_metadata( $upload['file'], $img_w, $img_h ) );
-		update_post_meta( $attachment_id, '_t2i_optimized', 1 );
+		update_post_meta( $attachment_id, '_t2i_optimized', (string) self::GRAY_LEVELS );
 		// Some sites filter wp_get_attachment_url() into an attachment-post permalink.
 		// The upload result is the original, direct PNG URL and must be used in <img src>.
 		return esc_url_raw( $upload['url'] );

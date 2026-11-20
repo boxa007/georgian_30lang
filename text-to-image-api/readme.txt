@@ -4,7 +4,7 @@ Tags: image, content protection, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.4.10
+Stable tag: 2.4.12
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -39,6 +39,10 @@ Send regular post content containing either class:
 `<p class="nextjs1">This paragraph will also become a local PNG.</p>`
 
 == Changelog ==
+
+= 2.4.12 =
+* Cards are black-and-white: PNGs are saved as a 3-level gray palette on pure white (about 4.7x smaller).
+* Cleanup no longer loops on cached query results (W3 Total Cache) and re-encodes older 4-level cards.
 
 = 2.4.10 =
 * Cards are black-and-white: PNGs are saved as a 4-level gray palette on pure white (about 4x smaller).
