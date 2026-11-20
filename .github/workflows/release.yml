@@ -1,9 +1,15 @@
 name: Release plugin
 
+# A release is created automatically when main gets a plugin version that has
+# no release yet (version taken from the plugin header). The zip asset name
+# matches what the plugin's GitHub updater looks for: text-to-image-api-*.zip
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths:
+      - 'text-to-image-api/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,17 +19,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build zip
+      - name: Read version
+        id: v
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          grep -q "Version: ${VERSION}$" text-to-image-api/text-to-image-api.php || { echo "Plugin header version does not match tag ${VERSION}"; exit 1; }
-          zip -r "text-to-image-api-${VERSION}.zip" text-to-image-api
-      - name: Create release
+          VERSION=$(sed -n 's/^ \* Version: *//p' text-to-image-api/text-to-image-api.php | head -1 | tr -d '\r ')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Build zip and create release if missing
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" "text-to-image-api-${VERSION}.zip" \
-            --title "Text to Image API ${VERSION}" \
+          if gh release view "v$VERSION" >/dev/null 2>&1; then echo "Release v$VERSION exists"; exit 0; fi
+          zip -r "text-to-image-api-$VERSION.zip" text-to-image-api
+          gh release create "v$VERSION" "text-to-image-api-$VERSION.zip" \
+            --target "$GITHUB_SHA" \
+            --title "Text to Image API $VERSION" \
             --notes "Black-and-white cards as 3-level gray PNG (~4.7x smaller), no resized copies, cleanup of older cards. See readme.txt changelog." \
             --latest
