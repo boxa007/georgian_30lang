@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.12
+ * Version: 2.4.14
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.12';
+	const VERSION            = '2.4.14';
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
 	const GRAY_LEVELS        = 3;     // black-and-white cards: 3 gray levels (white, mid-gray, black), ~4.7x smaller PNG
 	const CLEANUP_BATCH_SECONDS = 40;
@@ -62,6 +62,9 @@ final class Text_To_Image_API {
 			if ( $request->get_param( 'reset' ) ) {
 				delete_option( 't2i_cleanup_done' );
 			}
+			if ( 'files' === $request->get_param( 'phase' ) ) {
+				return rest_ensure_response( self::purge_orphan_copies() );
+			}
 			self::cleanup_batch();
 			$ran = true;
 		}
@@ -73,6 +76,63 @@ final class Text_To_Image_API {
 			'next_scheduled' => wp_next_scheduled( 't2i_cleanup_batch' ),
 			'lock'           => (bool) get_transient( 't2i_cleanup_lock' ),
 		) );
+	}
+
+	/**
+	 * Delete leftover resized ('-WxH') and '-scaled' copies of cards that WordPress
+	 * no longer lists in metadata. A copy is removed only when its original card
+	 * file exists next to it and no attachment uses the copy as its file.
+	 */
+	private static function purge_orphan_copies() {
+		global $wpdb;
+		$start   = microtime( true );
+		$uploads = wp_get_upload_dir();
+		$base    = trailingslashit( $uploads['basedir'] );
+		// Attachments still pointing at a '-scaled' copy: switch them to the original card
+		// (the URL used in posts) when the original exists, written straight to the table.
+		$repointed = 0;
+		$rows = (array) $wpdb->get_results(
+			"SELECT meta_id, post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file'
+			   AND meta_value LIKE '%text-to-image-%-scaled.png' AND " . (int) wp_rand( 1, 2000000000 ) . ' > 0'
+		);
+		$in_use = array();
+		foreach ( $rows as $row ) {
+			$orig_rel = preg_replace( '/-scaled\.png$/', '.png', $row->meta_value );
+			if ( file_exists( $base . $orig_rel ) ) {
+				$wpdb->update( $wpdb->postmeta, array( 'meta_value' => $orig_rel ), array( 'meta_id' => (int) $row->meta_id ) );
+				wp_cache_delete( (int) $row->post_id, 'post_meta' );
+				$repointed++;
+			} else {
+				$in_use[ $row->meta_value ] = true;
+			}
+		}
+		$deleted = 0; $bytes = 0; $kept = 0; $left = 0; $timeout = false;
+		foreach ( (array) glob( $base . '*/*/text-to-image-*.png' ) as $path ) {
+			if ( ! preg_match( '/^(.*)-(\d+x\d+|scaled)\.png$/', $path, $m ) ) {
+				continue;
+			}
+			if ( $timeout || microtime( true ) - $start > self::CLEANUP_BATCH_SECONDS ) {
+				$timeout = true;
+				$left++;
+				continue;
+			}
+			$orig = $m[1] . '.png';
+			$rel  = substr( $path, strlen( $base ) );
+			if ( ! file_exists( $orig ) || isset( $in_use[ $rel ] ) ) {
+				$kept++;
+				continue;
+			}
+			$size = (int) @filesize( $path );
+			if ( @unlink( $path ) ) {
+				$deleted++;
+				$bytes += $size;
+			}
+		}
+		$stats = get_option( 't2i_purge_stats', array( 'deleted' => 0, 'bytes' => 0 ) );
+		$stats['deleted'] += $deleted;
+		$stats['bytes']   += $bytes;
+		update_option( 't2i_purge_stats', $stats, false );
+		return array( 'phase' => 'files', 'repointed' => $repointed, 'deleted_now' => $deleted, 'bytes_now' => $bytes, 'kept' => $kept, 'left' => $left, 'total' => $stats );
 	}
 
 	public static function add_cron_interval( $schedules ) {
