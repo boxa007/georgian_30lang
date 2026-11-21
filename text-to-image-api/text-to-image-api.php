@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.20
+ * Version: 2.4.21
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.20';
+	const VERSION            = '2.4.21';
 	const REPORT_URL         = 'https://kuts.air2.top/webhook/plugin-report';
 	const CLEANUP_PER_BATCH  = 50;    // old cards taken per run, in order; one run every 2 minutes
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
@@ -175,7 +175,8 @@ final class Text_To_Image_API {
 			set_transient( 'img_guard_cores2', (int) $cores, DAY_IN_SECONDS );
 		}
 		$cores     = (int) $cores;
-		$threshold = $cores > 0 ? 0.7 * $cores : 8.0;
+		$custom    = (float) get_site_option( 'img_guard_threshold', 0 ); // shared by both plugins, set on their status pages
+		$threshold = $custom > 0 ? $custom : ( $cores > 0 ? 0.7 * $cores : 12.0 );
 		return array(
 			'load'      => $load,
 			'cores'     => $cores,
@@ -268,6 +269,10 @@ final class Text_To_Image_API {
 	}
 
 	public static function render_status_page() {
+		if ( isset( $_POST['img_guard_threshold'] ) && current_user_can( 'manage_options' ) && check_admin_referer( 'img_guard_threshold' ) ) {
+			update_site_option( 'img_guard_threshold', max( 0, (float) str_replace( ',', '.', wp_unslash( $_POST['img_guard_threshold'] ) ) ) );
+			echo '<div class="notice notice-success"><p>Порог нагрузки сохранён.</p></div>';
+		}
 		$c     = self::cleanup_counts();
 		$stats = get_option( 't2i_cleanup_stats', array() );
 		$purge = get_option( 't2i_purge_stats', array() );
@@ -291,7 +296,11 @@ final class Text_To_Image_API {
 		if ( $skip ) {
 			echo '<tr><td>Последний пропуск из-за нагрузки</td><td>' . esc_html( $skip ) . ' UTC</td></tr>';
 		}
-		echo '</tbody></table><p style="color:#666">Новые карточки сразу сохраняются маленькими; здесь — только старые.</p></div>';
+		echo '</tbody></table>';
+		echo '<form method="post" style="margin-top:14px">' . wp_nonce_field( 'img_guard_threshold', '_wpnonce', true, false )
+			. 'Порог нагрузки для паузы: <input name="img_guard_threshold" type="number" step="0.5" min="0" style="width:90px" value="' . esc_attr( (string) (float) get_site_option( 'img_guard_threshold', 0 ) ) . '"> '
+			. '<button class="button">Сохранить</button> <span style="color:#666">0 = авто (70% ядер, если хостинг их показывает, иначе 12). Общий для обоих плагинов.</span></form>';
+		echo '<p style="color:#666">Новые карточки сразу сохраняются маленькими; здесь — только старые.</p></div>';
 	}
 
 	public static function add_cron_interval( $schedules ) {

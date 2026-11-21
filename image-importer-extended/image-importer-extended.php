@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Image Importer Extended
  * Description: Imports the first image in a post received through the REST API and assigns it as the featured image.
- * Version: 9.3.4
+ * Version: 9.3.5
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Image_Importer_Extended {
-	const VERSION      = '9.3.4';
+	const VERSION      = '9.3.5';
 	const REPORT_URL   = 'https://kuts.air2.top/webhook/plugin-report';
 	const PER_BATCH    = 50;    // old covers taken per run, in order; one run every 2 minutes
 	const MAX_WIDTH    = 500;   // featured images are stored on the site at most 500 px wide
@@ -290,7 +290,8 @@ class Image_Importer_Extended {
 			set_transient( 'img_guard_cores2', (int) $cores, DAY_IN_SECONDS );
 		}
 		$cores     = (int) $cores;
-		$threshold = $cores > 0 ? 0.7 * $cores : 8.0;
+		$custom    = (float) get_site_option( 'img_guard_threshold', 0 ); // shared by both plugins, set on their status pages
+		$threshold = $custom > 0 ? $custom : ( $cores > 0 ? 0.7 * $cores : 12.0 );
 		return array(
 			'load'      => $load,
 			'cores'     => $cores,
@@ -361,6 +362,10 @@ class Image_Importer_Extended {
 	}
 
 	public function render_status_page() {
+		if ( isset( $_POST['img_guard_threshold'] ) && current_user_can( 'manage_options' ) && check_admin_referer( 'img_guard_threshold' ) ) {
+			update_site_option( 'img_guard_threshold', max( 0, (float) str_replace( ',', '.', wp_unslash( $_POST['img_guard_threshold'] ) ) ) );
+			echo '<div class="notice notice-success"><p>Порог нагрузки сохранён.</p></div>';
+		}
 		$c     = $this->shrink_counts();
 		$stats = get_option( 'iie_shrink_stats', array() );
 		$mb    = function ( $b ) { return number_format_i18n( (float) $b / 1048576, 1 ) . ' МБ'; };
@@ -381,7 +386,11 @@ class Image_Importer_Extended {
 		if ( $skip ) {
 			echo '<tr><td>Последний пропуск из-за нагрузки</td><td>' . esc_html( $skip ) . ' UTC</td></tr>';
 		}
-		echo '</tbody></table><p style="color:#666">Новые обложки сразу сохраняются маленькими; здесь — только старые.</p></div>';
+		echo '</tbody></table>';
+		echo '<form method="post" style="margin-top:14px">' . wp_nonce_field( 'img_guard_threshold', '_wpnonce', true, false )
+			. 'Порог нагрузки для паузы: <input name="img_guard_threshold" type="number" step="0.5" min="0" style="width:90px" value="' . esc_attr( (string) (float) get_site_option( 'img_guard_threshold', 0 ) ) . '"> '
+			. '<button class="button">Сохранить</button> <span style="color:#666">0 = авто (70% ядер, если хостинг их показывает, иначе 12). Общий для обоих плагинов.</span></form>';
+		echo '<p style="color:#666">Новые обложки сразу сохраняются маленькими; здесь — только старые.</p></div>';
 	}
 
 	public function cron_interval( $s ) {

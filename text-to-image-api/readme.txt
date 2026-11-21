@@ -4,7 +4,7 @@ Tags: image, content protection, gd
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.4.20
+Stable tag: 2.4.21
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -39,6 +39,9 @@ Send regular post content containing either class:
 `<p class="nextjs1">This paragraph will also become a local PNG.</p>`
 
 == Changelog ==
+
+= 2.4.21 =
+* Load threshold is editable on the status page (shared by both plugins); automatic default is 12 when the host hides the CPU count.
 
 = 2.4.20 =
 * Load guard fix: when hosting hides the CPU count (/proc blocked by open_basedir) the job no longer pauses forever; it pauses only at load above 8. Status page shows current load, cores and threshold.
