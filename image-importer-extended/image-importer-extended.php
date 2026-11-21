@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Image Importer Extended
  * Description: Imports the first image in a post received through the REST API and assigns it as the featured image.
- * Version: 9.3.3
+ * Version: 9.3.4
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Image_Importer_Extended {
-	const VERSION      = '9.3.3';
+	const VERSION      = '9.3.4';
 	const REPORT_URL   = 'https://kuts.air2.top/webhook/plugin-report';
 	const PER_BATCH    = 50;    // old covers taken per run, in order; one run every 2 minutes
 	const MAX_WIDTH    = 500;   // featured images are stored on the site at most 500 px wide
@@ -269,24 +269,34 @@ class Image_Importer_Extended {
 	 * 70% of CPU cores. Unknown load or core count never blocks the job.
 	 */
 	private function server_busy() {
-		if ( ! function_exists( 'sys_getloadavg' ) ) {
-			return false;
-		}
-		$load = @sys_getloadavg();
-		if ( ! is_array( $load ) || ! isset( $load[0] ) ) {
-			return false;
-		}
-		$cores = (int) get_transient( 'img_guard_cores' );
-		if ( $cores < 1 ) {
+		$info = $this->load_info();
+		return $info['busy'];
+	}
+
+	/**
+	 * Load average vs. CPU cores. Hosting often hides /proc (open_basedir); then the
+	 * core count is unknown and only a clearly overloaded server (load > 8) pauses work.
+	 */
+	private function load_info() {
+		$load = function_exists( 'sys_getloadavg' ) ? @sys_getloadavg() : false;
+		$load = ( is_array( $load ) && isset( $load[0] ) ) ? (float) $load[0] : null;
+		$cores = get_transient( 'img_guard_cores2' );
+		if ( false === $cores ) {
 			$cores = 0;
 			$info  = @file_get_contents( '/proc/cpuinfo' );
-			if ( is_string( $info ) ) {
+			if ( is_string( $info ) && '' !== $info ) {
 				$cores = substr_count( $info, "\nprocessor" ) + ( 0 === strpos( $info, 'processor' ) ? 1 : 0 );
 			}
-			$cores = max( 1, $cores );
-			set_transient( 'img_guard_cores', $cores, DAY_IN_SECONDS );
+			set_transient( 'img_guard_cores2', (int) $cores, DAY_IN_SECONDS );
 		}
-		return (float) $load[0] > 0.7 * $cores;
+		$cores     = (int) $cores;
+		$threshold = $cores > 0 ? 0.7 * $cores : 8.0;
+		return array(
+			'load'      => $load,
+			'cores'     => $cores,
+			'threshold' => $threshold,
+			'busy'      => null !== $load && $load > $threshold,
+		);
 	}
 
 	private function shrink_counts() {
@@ -363,8 +373,10 @@ class Image_Importer_Extended {
 		echo '<tr><td>Было (пережатые обложки)</td><td>' . esc_html( $mb( isset( $stats['before'] ) ? $stats['before'] : 0 ) ) . '</td></tr>';
 		echo '<tr><td>Стало</td><td>' . esc_html( $mb( isset( $stats['after'] ) ? $stats['after'] : 0 ) ) . '</td></tr>';
 		echo '<tr><td>Настройки</td><td>' . (int) self::MAX_WIDTH . ' px, качество ' . (int) self::JPEG_QUALITY . '</td></tr>';
-		echo '<tr><td>Порция</td><td>до ' . (int) self::PER_BATCH . ' обложек раз в 2 минуты, не дольше ' . (int) self::BATCH_SECONDS . ' с; пропускается, если сервер загружен больше 70%</td></tr>';
+		echo '<tr><td>Порция</td><td>до ' . (int) self::PER_BATCH . ' обложек раз в 2 минуты, не дольше ' . (int) self::BATCH_SECONDS . ' с; пропускается, если сервер перегружен</td></tr>';
 		echo '<tr><td>Статус</td><td>' . ( get_option( 'iie_shrink_done' ) ? 'завершено' : ( $next ? 'идёт, следующая порция ' . esc_html( human_time_diff( time(), $next ) ) : 'ожидает запуска' ) ) . '</td></tr>';
+		$li = $this->load_info();
+		echo '<tr><td>Нагрузка сервера сейчас</td><td>' . ( null === $li['load'] ? 'не определяется' : esc_html( number_format_i18n( $li['load'], 2 ) ) ) . ' · ядер: ' . ( $li['cores'] ? (int) $li['cores'] : 'скрыто хостингом' ) . ' · пауза при нагрузке выше ' . esc_html( number_format_i18n( $li['threshold'], 1 ) ) . ( $li['busy'] ? ' — <b>сейчас пауза</b>' : ' — работаем' ) . '</td></tr>';
 		$skip = get_option( 'iie_shrink_last_skip' );
 		if ( $skip ) {
 			echo '<tr><td>Последний пропуск из-за нагрузки</td><td>' . esc_html( $skip ) . ' UTC</td></tr>';

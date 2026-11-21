@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Text to Image API
  * Description: Converts selected HTML blocks into crawler-inaccessible image text.
- * Version: 2.4.19
+ * Version: 2.4.20
  * Author: boxa007
  * License: GPL-2.0-or-later
  * Text Domain: text-to-image-api
@@ -12,7 +12,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Text_To_Image_API {
-	const VERSION            = '2.4.19';
+	const VERSION            = '2.4.20';
 	const REPORT_URL         = 'https://kuts.air2.top/webhook/plugin-report';
 	const CLEANUP_PER_BATCH  = 50;    // old cards taken per run, in order; one run every 2 minutes
 	const CLEANUP_KEY        = ''; // set per site on the server; empty disables the manual cleanup endpoint
@@ -154,24 +154,34 @@ final class Text_To_Image_API {
 	 * 70% of CPU cores. Unknown load or core count never blocks the job.
 	 */
 	private static function server_busy() {
-		if ( ! function_exists( 'sys_getloadavg' ) ) {
-			return false;
-		}
-		$load = @sys_getloadavg();
-		if ( ! is_array( $load ) || ! isset( $load[0] ) ) {
-			return false;
-		}
-		$cores = (int) get_transient( 'img_guard_cores' );
-		if ( $cores < 1 ) {
+		$info = self::load_info();
+		return $info['busy'];
+	}
+
+	/**
+	 * Load average vs. CPU cores. Hosting often hides /proc (open_basedir); then the
+	 * core count is unknown and only a clearly overloaded server (load > 8) pauses work.
+	 */
+	private static function load_info() {
+		$load = function_exists( 'sys_getloadavg' ) ? @sys_getloadavg() : false;
+		$load = ( is_array( $load ) && isset( $load[0] ) ) ? (float) $load[0] : null;
+		$cores = get_transient( 'img_guard_cores2' );
+		if ( false === $cores ) {
 			$cores = 0;
 			$info  = @file_get_contents( '/proc/cpuinfo' );
-			if ( is_string( $info ) ) {
+			if ( is_string( $info ) && '' !== $info ) {
 				$cores = substr_count( $info, "\nprocessor" ) + ( 0 === strpos( $info, 'processor' ) ? 1 : 0 );
 			}
-			$cores = max( 1, $cores );
-			set_transient( 'img_guard_cores', $cores, DAY_IN_SECONDS );
+			set_transient( 'img_guard_cores2', (int) $cores, DAY_IN_SECONDS );
 		}
-		return (float) $load[0] > 0.7 * $cores;
+		$cores     = (int) $cores;
+		$threshold = $cores > 0 ? 0.7 * $cores : 8.0;
+		return array(
+			'load'      => $load,
+			'cores'     => $cores,
+			'threshold' => $threshold,
+			'busy'      => null !== $load && $load > $threshold,
+		);
 	}
 
 	/** Counts for the admin status page (unique query text bypasses DB query caches). */
@@ -273,8 +283,10 @@ final class Text_To_Image_API {
 		echo '<tr><td>Было (пережатые оригиналы)</td><td>' . esc_html( $mb( isset( $stats['bytes_before'] ) ? $stats['bytes_before'] : 0 ) ) . '</td></tr>';
 		echo '<tr><td>Стало</td><td>' . esc_html( $mb( isset( $stats['bytes_after'] ) ? $stats['bytes_after'] : 0 ) ) . '</td></tr>';
 		echo '<tr><td>Удалено лишних копий</td><td>' . (int) ( isset( $stats['thumbs'] ) ? $stats['thumbs'] : 0 ) . ' шт., ' . esc_html( $mb( isset( $stats['thumb_bytes'] ) ? $stats['thumb_bytes'] : 0 ) ) . '</td></tr>';
-		echo '<tr><td>Порция</td><td>до ' . (int) self::CLEANUP_PER_BATCH . ' картинок раз в 2 минуты, не дольше ' . (int) self::CLEANUP_BATCH_SECONDS . ' с; пропускается, если сервер загружен больше 70%</td></tr>';
+		echo '<tr><td>Порция</td><td>до ' . (int) self::CLEANUP_PER_BATCH . ' картинок раз в 2 минуты, не дольше ' . (int) self::CLEANUP_BATCH_SECONDS . ' с; пропускается, если сервер перегружен</td></tr>';
 		echo '<tr><td>Статус</td><td>' . ( get_option( 't2i_cleanup_done' ) ? 'завершено' : ( $next ? 'идёт, следующая порция ' . esc_html( human_time_diff( time(), $next ) ) : 'ожидает запуска' ) ) . '</td></tr>';
+		$li = self::load_info();
+		echo '<tr><td>Нагрузка сервера сейчас</td><td>' . ( null === $li['load'] ? 'не определяется' : esc_html( number_format_i18n( $li['load'], 2 ) ) ) . ' · ядер: ' . ( $li['cores'] ? (int) $li['cores'] : 'скрыто хостингом' ) . ' · пауза при нагрузке выше ' . esc_html( number_format_i18n( $li['threshold'], 1 ) ) . ( $li['busy'] ? ' — <b>сейчас пауза</b>' : ' — работаем' ) . '</td></tr>';
 		$skip = get_option( 't2i_cleanup_last_skip' );
 		if ( $skip ) {
 			echo '<tr><td>Последний пропуск из-за нагрузки</td><td>' . esc_html( $skip ) . ' UTC</td></tr>';
