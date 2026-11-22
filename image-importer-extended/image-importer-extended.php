@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Image Importer Extended
  * Description: Imports the first image in a post received through the REST API and assigns it as the featured image.
- * Version: 9.3.5
+ * Version: 9.3.6
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Image_Importer_Extended {
-	const VERSION      = '9.3.5';
+	const VERSION      = '9.3.6';
 	const REPORT_URL   = 'https://kuts.air2.top/webhook/plugin-report';
 	const PER_BATCH    = 50;    // old covers taken per run, in order; one run every 2 minutes
 	const MAX_WIDTH    = 500;   // featured images are stored on the site at most 500 px wide
@@ -197,6 +197,9 @@ class Image_Importer_Extended {
 			return $tmp_file;
 		}
 		$this->shrink_file( $tmp_file );
+		/* Covers are stored once, at 500 px: WordPress makes no resized copies of them. */
+		add_filter( 'intermediate_image_sizes_advanced', '__return_empty_array', 999 );
+		add_filter( 'big_image_size_threshold', '__return_false', 999 );
 
 		$path = wp_parse_url( $url, PHP_URL_PATH );
 		$name = sanitize_file_name( $path ? wp_basename( $path ) : 'featured-image.jpg' );
@@ -212,8 +215,12 @@ class Image_Importer_Extended {
 			$post_id
 		);
 
+		remove_filter( 'intermediate_image_sizes_advanced', '__return_empty_array', 999 );
+		remove_filter( 'big_image_size_threshold', '__return_false', 999 );
 		if ( is_wp_error( $attachment_id ) ) {
 			@unlink( $tmp_file );
+		} else {
+			update_post_meta( (int) $attachment_id, '_iie_small', '2' );
 		}
 
 		return $attachment_id;
@@ -305,7 +312,7 @@ class Image_Importer_Extended {
 		$nc    = (int) wp_rand( 1, 2000000000 );
 		$total = (int) $wpdb->get_var( "SELECT COUNT(DISTINCT meta_value) FROM {$wpdb->postmeta} WHERE meta_key = '_thumbnail_id' AND meta_value > 0 AND {$nc} = {$nc}" );
 		$done  = (int) $wpdb->get_var(
-			"SELECT COUNT(DISTINCT t.meta_value) FROM {$wpdb->postmeta} t JOIN {$wpdb->postmeta} m ON m.post_id = t.meta_value AND m.meta_key = '_iie_small' AND m.meta_value = '1'
+			"SELECT COUNT(DISTINCT t.meta_value) FROM {$wpdb->postmeta} t JOIN {$wpdb->postmeta} m ON m.post_id = t.meta_value AND m.meta_key = '_iie_small' AND m.meta_value IN ('2','retry2')
 			 WHERE t.meta_key = '_thumbnail_id' AND t.meta_value > 0 AND {$nc} = {$nc}"
 		);
 		return array( 'total' => $total, 'done' => min( $done, $total ), 'left' => max( 0, $total - $done ) );
@@ -316,7 +323,7 @@ class Image_Importer_Extended {
 			update_option( 'iie_reported_version', self::VERSION, false );
 			$this->send_report( 'install' );
 		}
-		$done = (bool) get_option( 'iie_shrink_done' );
+		$done = (bool) get_option( 'iie_shrink_done2' );
 		if ( ! $done && ! wp_next_scheduled( 'iie_daily_report' ) ) {
 			wp_schedule_event( time() + DAY_IN_SECONDS, 'daily', 'iie_daily_report' );
 		}
@@ -326,8 +333,8 @@ class Image_Importer_Extended {
 	}
 
 	public function daily_report() {
-		$this->send_report( get_option( 'iie_shrink_done' ) ? 'done' : 'daily' );
-		if ( get_option( 'iie_shrink_done' ) ) {
+		$this->send_report( get_option( 'iie_shrink_done2' ) ? 'done' : 'daily' );
+		if ( get_option( 'iie_shrink_done2' ) ) {
 			wp_clear_scheduled_hook( 'iie_daily_report' );
 		}
 	}
@@ -344,11 +351,11 @@ class Image_Importer_Extended {
 				'site'      => wp_parse_url( home_url(), PHP_URL_HOST ),
 				'plugin'    => 'image-importer-extended',
 				'version'   => self::VERSION,
-				'status'    => get_option( 'iie_shrink_done' ) ? 'done' : 'running',
+				'status'    => get_option( 'iie_shrink_done2' ) ? 'done' : 'running',
 				'total'     => $c['total'],
 				'done'      => $c['done'],
 				'left'      => $c['left'],
-				'saved_mb'  => round( ( isset( $st['before'] ) ? $st['before'] - $st['after'] : 0 ) / 1048576 ),
+				'saved_mb'  => round( ( ( isset( $st['before'] ) ? $st['before'] - $st['after'] : 0 ) + ( isset( $st['copies_size'] ) ? $st['copies_size'] : 0 ) ) / 1048576 ),
 				'last_skip' => (string) get_option( 'iie_shrink_last_skip' ),
 				'event'     => $event,
 				'wp'        => get_bloginfo( 'version' ),
@@ -377,9 +384,10 @@ class Image_Importer_Extended {
 		echo '<table class="widefat striped" style="max-width:600px;margin-top:16px"><tbody>';
 		echo '<tr><td>Было (пережатые обложки)</td><td>' . esc_html( $mb( isset( $stats['before'] ) ? $stats['before'] : 0 ) ) . '</td></tr>';
 		echo '<tr><td>Стало</td><td>' . esc_html( $mb( isset( $stats['after'] ) ? $stats['after'] : 0 ) ) . '</td></tr>';
+		echo '<tr><td>Удалено копий обложек</td><td>' . (int) ( isset( $stats['copies'] ) ? $stats['copies'] : 0 ) . ' файлов, ' . esc_html( $mb( isset( $stats['copies_size'] ) ? $stats['copies_size'] : 0 ) ) . '</td></tr>';
 		echo '<tr><td>Настройки</td><td>' . (int) self::MAX_WIDTH . ' px, качество ' . (int) self::JPEG_QUALITY . '</td></tr>';
 		echo '<tr><td>Порция</td><td>до ' . (int) self::PER_BATCH . ' обложек раз в 2 минуты, не дольше ' . (int) self::BATCH_SECONDS . ' с; пропускается, если сервер перегружен</td></tr>';
-		echo '<tr><td>Статус</td><td>' . ( get_option( 'iie_shrink_done' ) ? 'завершено' : ( $next ? 'идёт, следующая порция ' . esc_html( human_time_diff( time(), $next ) ) : 'ожидает запуска' ) ) . '</td></tr>';
+		echo '<tr><td>Статус</td><td>' . ( get_option( 'iie_shrink_done2' ) ? 'завершено' : ( $next ? 'идёт, следующая порция ' . esc_html( human_time_diff( time(), $next ) ) : 'ожидает запуска' ) ) . '</td></tr>';
 		$li = $this->load_info();
 		echo '<tr><td>Нагрузка сервера сейчас</td><td>' . ( null === $li['load'] ? 'не определяется' : esc_html( number_format_i18n( $li['load'], 2 ) ) ) . ' · ядер: ' . ( $li['cores'] ? (int) $li['cores'] : 'скрыто хостингом' ) . ' · пауза при нагрузке выше ' . esc_html( number_format_i18n( $li['threshold'], 1 ) ) . ( $li['busy'] ? ' — <b>сейчас пауза</b>' : ' — работаем' ) . '</td></tr>';
 		$skip = get_option( 'iie_shrink_last_skip' );
@@ -390,7 +398,7 @@ class Image_Importer_Extended {
 		echo '<form method="post" style="margin-top:14px">' . wp_nonce_field( 'img_guard_threshold', '_wpnonce', true, false )
 			. 'Порог нагрузки для паузы: <input name="img_guard_threshold" type="number" step="0.5" min="0" style="width:90px" value="' . esc_attr( (string) (float) get_site_option( 'img_guard_threshold', 0 ) ) . '"> '
 			. '<button class="button">Сохранить</button> <span style="color:#666">0 = авто (70% ядер, если хостинг их показывает, иначе 12). Общий для обоих плагинов.</span></form>';
-		echo '<p style="color:#666">Новые обложки сразу сохраняются маленькими; здесь — только старые.</p></div>';
+		echo '<p style="color:#666">Новые обложки сразу сохраняются маленькими и без копий разных размеров. Здесь — старые: сжатие до 500 px и удаление копий (копия, на которую есть ссылка в тексте статьи, остаётся).</p></div>';
 	}
 
 	public function cron_interval( $s ) {
@@ -399,7 +407,7 @@ class Image_Importer_Extended {
 	}
 
 	public function schedule_shrink() {
-		$done = get_option( 'iie_shrink_done' );
+		$done = get_option( 'iie_shrink_done2' );
 		if ( $done ) {
 			if ( wp_next_scheduled( 'iie_shrink_batch' ) ) {
 				wp_clear_scheduled_hook( 'iie_shrink_batch' );
@@ -430,11 +438,11 @@ class Image_Importer_Extended {
 		$ids   = $wpdb->get_col(
 			"SELECT DISTINCT t.meta_value FROM {$wpdb->postmeta} t
 			 LEFT JOIN {$wpdb->postmeta} m ON m.post_id = t.meta_value AND m.meta_key = '_iie_small'
-			 WHERE t.meta_key = '_thumbnail_id' AND t.meta_value > 0 AND m.meta_id IS NULL AND {$nc} = {$nc}
+			 WHERE t.meta_key = '_thumbnail_id' AND t.meta_value > 0 AND ( m.meta_id IS NULL OR m.meta_value NOT IN ('2','retry2') ) AND {$nc} = {$nc}
 			 ORDER BY t.meta_value LIMIT " . (int) self::PER_BATCH
 		);
 		if ( empty( $ids ) ) {
-			update_option( 'iie_shrink_done', gmdate( 'c' ), false );
+			update_option( 'iie_shrink_done2', gmdate( 'c' ), false );
 			wp_clear_scheduled_hook( 'iie_shrink_batch' );
 			delete_transient( 'iie_shrink_lock' );
 			$this->send_report( 'done' );
@@ -445,9 +453,12 @@ class Image_Importer_Extended {
 			if ( microtime( true ) - $start > self::BATCH_SECONDS ) {
 				break;
 			}
-			$id = (int) $id;
-			update_post_meta( $id, '_iie_small', 'try' ); // a crash on one image never blocks the queue
-			$file = get_attached_file( $id );
+			$id   = (int) $id;
+			wp_cache_delete( $id, 'post_meta' );
+			$prev = (string) get_post_meta( $id, '_iie_small', true );
+			// a crash on one image never blocks the queue: the second attempt is the last one
+			update_post_meta( $id, '_iie_small', 'try2' === $prev ? 'retry2' : 'try2' );
+			$file = get_attached_file( $id, true );
 			$mime = get_post_mime_type( $id );
 			if ( $file && file_exists( $file ) && in_array( $mime, array( 'image/jpeg', 'image/png', 'image/webp' ), true ) ) {
 				$before = (int) filesize( $file );
@@ -462,23 +473,73 @@ class Image_Importer_Extended {
 						$meta['width']    = (int) $dim[0];
 						$meta['height']   = (int) $dim[1];
 						$meta['filesize'] = (int) filesize( $file );
-						/* Drop resized copies that are now larger than the original. */
-						if ( ! empty( $meta['sizes'] ) && is_array( $meta['sizes'] ) ) {
-							foreach ( $meta['sizes'] as $k => $s ) {
-								if ( isset( $s['width'] ) && (int) $s['width'] > (int) $dim[0] ) {
-									@unlink( dirname( $file ) . '/' . basename( $s['file'] ) );
-									unset( $meta['sizes'][ $k ] );
-								}
-							}
-						}
 						wp_update_attachment_metadata( $id, $meta );
 					}
 				}
+				$this->drop_copies( $id, $file, $stats );
 			}
-			update_post_meta( $id, '_iie_small', 1 );
+			update_post_meta( $id, '_iie_small', '2' );
 		}
 		update_option( 'iie_shrink_stats', $stats, false );
 		delete_transient( 'iie_shrink_lock' );
+	}
+
+	/**
+	 * Delete every resized copy of a cover (and WordPress' kept big original): the theme
+	 * falls back to the 500 px cover itself. A copy whose file name appears in a post text is kept.
+	 */
+	private function drop_copies( $id, $file, &$stats ) {
+		global $wpdb;
+		$meta = wp_get_attachment_metadata( $id );
+		if ( ! is_array( $meta ) ) {
+			return;
+		}
+		$dir   = dirname( $file );
+		$files = array();
+		if ( ! empty( $meta['sizes'] ) && is_array( $meta['sizes'] ) ) {
+			foreach ( $meta['sizes'] as $k => $sz ) {
+				if ( ! empty( $sz['file'] ) ) {
+					$files[ 'size:' . $k ] = basename( $sz['file'] );
+				}
+			}
+		}
+		if ( ! empty( $meta['original_image'] ) ) {
+			$files['original'] = basename( $meta['original_image'] );
+		}
+		if ( ! $files ) {
+			return;
+		}
+		$nc      = (int) wp_rand( 1, 2000000000 );
+		$changed = false;
+		foreach ( $files as $key => $name ) {
+			if ( basename( $file ) === $name ) {
+				continue; // never the cover itself
+			}
+			$used = $wpdb->get_var( $wpdb->prepare(
+				"SELECT ID FROM {$wpdb->posts} WHERE post_content LIKE %s AND post_type NOT IN ('revision','attachment') AND {$nc} = {$nc} LIMIT 1",
+				'%' . $wpdb->esc_like( $name ) . '%'
+			) );
+			if ( $used ) {
+				continue; // linked from a post text: keep it
+			}
+			$path = $dir . '/' . $name;
+			if ( file_exists( $path ) ) {
+				$bytes = (int) filesize( $path );
+				if ( @unlink( $path ) ) {
+					$stats['copies']      = ( isset( $stats['copies'] ) ? $stats['copies'] : 0 ) + 1;
+					$stats['copies_size'] = ( isset( $stats['copies_size'] ) ? $stats['copies_size'] : 0 ) + $bytes;
+				}
+			}
+			if ( 'original' === $key ) {
+				unset( $meta['original_image'] );
+			} else {
+				unset( $meta['sizes'][ substr( $key, 5 ) ] );
+			}
+			$changed = true;
+		}
+		if ( $changed ) {
+			wp_update_attachment_metadata( $id, $meta );
+		}
 	}
 
 	/* ---------- GitHub updater ---------- */
