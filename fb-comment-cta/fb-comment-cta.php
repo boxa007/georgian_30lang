@@ -50,6 +50,9 @@ class FB_Comment_CTA {
 			'fb_page'    => '',
 			'avatar'     => '',
 			'api'        => 'https://kuts.air2.top/webhook',
+			'counts'     => '1',
+			'likes'      => '50-90',
+			'comments'   => '40-80',
 		) );
 	}
 
@@ -66,8 +69,21 @@ class FB_Comment_CTA {
 			'fb_page'    => esc_url_raw( isset( $in['fb_page'] ) ? trim( $in['fb_page'] ) : '' ),
 			'avatar'     => esc_url_raw( isset( $in['avatar'] ) ? trim( $in['avatar'] ) : '' ),
 			'api'        => esc_url_raw( isset( $in['api'] ) && trim( $in['api'] ) ? untrailingslashit( trim( $in['api'] ) ) : 'https://kuts.air2.top/webhook' ),
+			'counts'     => empty( $in['counts'] ) ? '0' : '1',
+			'likes'      => self::range_str( isset( $in['likes'] ) ? $in['likes'] : '', '50-90' ),
+			'comments'   => self::range_str( isset( $in['comments'] ) ? $in['comments'] : '', '40-80' ),
 		);
 		return $out;
+	}
+
+	private static function range_str( $v, $def ) {
+		return preg_match( '/^\s*(\d{1,6})\s*-\s*(\d{1,6})\s*$/', (string) $v, $m ) && (int) $m[1] <= (int) $m[2] ? $m[1] . '-' . $m[2] : $def;
+	}
+
+	/** Same numbers for the same article on every visit (seeded by its address). */
+	private static function pick( $range, $seed ) {
+		list( $a, $b ) = array_map( 'intval', explode( '-', $range ) );
+		return $a + ( abs( crc32( $seed ) ) % ( $b - $a + 1 ) );
 	}
 
 	public function admin_menu() {
@@ -101,6 +117,9 @@ class FB_Comment_CTA {
 					</select><p class="description">Язык надписей, призыва и готовых комментариев.</p></td></tr>
 					<tr><th>Страница Facebook</th><td><input type="url" class="regular-text" name="<?php echo esc_attr( $n ); ?>[fb_page]" value="<?php echo esc_attr( $s['fb_page'] ); ?>" placeholder="https://www.facebook.com/..."><p class="description">Запасной адрес: используется, если в Baserow для статьи нет ни fb_post_url, ни FB Page URL.</p></td></tr>
 					<tr><th>Аватар</th><td><input type="url" class="regular-text" name="<?php echo esc_attr( $n ); ?>[avatar]" value="<?php echo esc_attr( $s['avatar'] ); ?>" placeholder="(по умолчанию — общий аватар редакции)"></td></tr>
+					<tr><th>Счётчики</th><td><label><input type="checkbox" name="<?php echo esc_attr( $n ); ?>[counts]" value="1" <?php checked( $s['counts'], '1' ); ?>> показывать строку с лайками и комментариями</label><br>
+						лайки <input type="text" size="8" name="<?php echo esc_attr( $n ); ?>[likes]" value="<?php echo esc_attr( $s['likes'] ); ?>"> &nbsp; комментарии <input type="text" size="8" name="<?php echo esc_attr( $n ); ?>[comments]" value="<?php echo esc_attr( $s['comments'] ); ?>">
+						<p class="description">Диапазон «от-до». Для каждой статьи число постоянное (не меняется при обновлении страницы).</p></td></tr>
 					<tr><th>API</th><td><input type="url" class="regular-text" name="<?php echo esc_attr( $n ); ?>[api]" value="<?php echo esc_attr( $s['api'] ); ?>"></td></tr>
 				</table>
 				<?php submit_button(); ?>
@@ -175,6 +194,9 @@ class FB_Comment_CTA {
 			<div class="fbcta-or"><?php echo esc_html( $t['or'] ); ?></div>
 			<div class="fbcta-list"></div>
 			<div class="fbcta-fb"><span class="fbcta-f">f</span> <?php echo esc_html( $t['disc'] ); ?></div>
+			<?php if ( '1' === $s['counts'] ) : $seed = (string) get_permalink(); ?>
+			<div class="fbcta-counts"><span>👍💗 <?php echo esc_html( number_format_i18n( self::pick( $s['likes'], $seed . '#l' ) ) ); ?></span><span>💬 <?php echo esc_html( number_format_i18n( self::pick( $s['comments'], $seed . '#c' ) ) . ' ' . $t['cmts'] ); ?></span></div>
+			<?php endif; ?>
 			<a class="fbcta-btn" href="#" target="_blank" rel="noopener nofollow">💬 <?php echo esc_html( $t['btn'] ); ?></a>
 			<div class="fbcta-foot"><?php echo esc_html( $t['foot'] ); ?></div>
 		</div>
@@ -192,20 +214,20 @@ class FB_Comment_CTA {
 
 	public static function texts( $lang ) {
 		$all = array(
-			'ru' => array( 'from' => 'Обращение от редакции', 'q' => 'Какое мнение вам ближе?', 'hint' => 'Можете скопировать эти варианты 👇', 'or' => 'Или написать своё мнение в Facebook. Нам очень важно знать, что вы думаете!', 'disc' => 'Обсуждение в Facebook', 'btn' => 'Высказать своё мнение', 'foot' => 'Для вас — несколько секунд, для нас — огромная помощь! 💗', 'copied' => 'Скопировано! Вставьте в комментарий на Facebook', 'copy' => 'Скопировать' ),
-			'uk' => array( 'from' => 'Звернення від редакції', 'q' => 'Яка думка вам ближча?', 'hint' => 'Можете скопіювати ці варіанти 👇', 'or' => 'Або напишіть свою думку у Facebook. Нам дуже важливо знати, що ви думаєте!', 'disc' => 'Обговорення у Facebook', 'btn' => 'Висловити свою думку', 'foot' => 'Для вас — кілька секунд, для нас — величезна допомога! 💗', 'copied' => 'Скопійовано! Вставте в коментар у Facebook', 'copy' => 'Скопіювати' ),
-			'en' => array( 'from' => 'A note from the editors', 'q' => 'Which opinion is closer to yours?', 'hint' => 'You can copy these options 👇', 'or' => 'Or write your own opinion on Facebook. We really want to know what you think!', 'disc' => 'Discussion on Facebook', 'btn' => 'Share your opinion', 'foot' => 'A few seconds for you, a huge help for us! 💗', 'copied' => 'Copied! Paste it into a Facebook comment', 'copy' => 'Copy' ),
-			'de' => array( 'from' => 'Ein Wort der Redaktion', 'q' => 'Welche Meinung teilen Sie eher?', 'hint' => 'Sie können diese Varianten kopieren 👇', 'or' => 'Oder schreiben Sie Ihre eigene Meinung auf Facebook. Es ist uns sehr wichtig, was Sie denken!', 'disc' => 'Diskussion auf Facebook', 'btn' => 'Meinung sagen', 'foot' => 'Für Sie ein paar Sekunden, für uns eine riesige Hilfe! 💗', 'copied' => 'Kopiert! Fügen Sie es in einen Facebook-Kommentar ein', 'copy' => 'Kopieren' ),
-			'fr' => array( 'from' => 'Un mot de la rédaction', 'q' => 'Quel avis vous ressemble le plus ?', 'hint' => 'Vous pouvez copier ces propositions 👇', 'or' => 'Ou écrivez votre propre avis sur Facebook. Nous tenons vraiment à savoir ce que vous pensez !', 'disc' => 'Discussion sur Facebook', 'btn' => 'Donner mon avis', 'foot' => 'Quelques secondes pour vous, une aide énorme pour nous ! 💗', 'copied' => 'Copié ! Collez-le dans un commentaire Facebook', 'copy' => 'Copier' ),
-			'es' => array( 'from' => 'Mensaje de la redacción', 'q' => '¿Qué opinión se parece más a la suya?', 'hint' => 'Puede copiar estas opciones 👇', 'or' => 'O escriba su propia opinión en Facebook. ¡Nos importa mucho lo que piensa!', 'disc' => 'Debate en Facebook', 'btn' => 'Dar mi opinión', 'foot' => '¡Para usted, unos segundos; para nosotros, una ayuda enorme! 💗', 'copied' => '¡Copiado! Péguelo en un comentario de Facebook', 'copy' => 'Copiar' ),
-			'pt' => array( 'from' => 'Mensagem da redação', 'q' => 'Qual opinião é mais parecida com a sua?', 'hint' => 'Pode copiar estas opções 👇', 'or' => 'Ou escreva a sua própria opinião no Facebook. É muito importante para nós saber o que pensa!', 'disc' => 'Discussão no Facebook', 'btn' => 'Dar a minha opinião', 'foot' => 'Para si, alguns segundos; para nós, uma ajuda enorme! 💗', 'copied' => 'Copiado! Cole num comentário no Facebook', 'copy' => 'Copiar' ),
-			'it' => array( 'from' => 'Un messaggio dalla redazione', 'q' => 'Quale opinione senti più vicina?', 'hint' => 'Puoi copiare queste opzioni 👇', 'or' => 'Oppure scrivi la tua opinione su Facebook. Per noi è importante sapere cosa ne pensi!', 'disc' => 'Discussione su Facebook', 'btn' => 'Dì la tua', 'foot' => 'Per te pochi secondi, per noi un aiuto enorme! 💗', 'copied' => 'Copiato! Incollalo in un commento su Facebook', 'copy' => 'Copia' ),
-			'pl' => array( 'from' => 'Słowo od redakcji', 'q' => 'Która opinia jest Ci bliższa?', 'hint' => 'Możesz skopiować te warianty 👇', 'or' => 'Albo napisz własną opinię na Facebooku. Bardzo chcemy wiedzieć, co myślisz!', 'disc' => 'Dyskusja na Facebooku', 'btn' => 'Wyraź swoją opinię', 'foot' => 'Dla Ciebie kilka sekund, dla nas ogromna pomoc! 💗', 'copied' => 'Skopiowano! Wklej w komentarzu na Facebooku', 'copy' => 'Kopiuj' ),
-			'ro' => array( 'from' => 'Un mesaj de la redacție', 'q' => 'Ce părere vi se potrivește mai mult?', 'hint' => 'Puteți copia aceste variante 👇', 'or' => 'Sau scrieți propria părere pe Facebook. Contează mult pentru noi ce credeți!', 'disc' => 'Discuție pe Facebook', 'btn' => 'Spuneți-vă părerea', 'foot' => 'Pentru dvs. câteva secunde, pentru noi un ajutor uriaș! 💗', 'copied' => 'Copiat! Lipiți-l într-un comentariu pe Facebook', 'copy' => 'Copiază' ),
-			'hu' => array( 'from' => 'A szerkesztőség üzenete', 'q' => 'Melyik vélemény áll közelebb Önhöz?', 'hint' => 'Ezeket a változatokat kimásolhatja 👇', 'or' => 'Vagy írja meg saját véleményét a Facebookon. Nagyon fontos nekünk, mit gondol!', 'disc' => 'Beszélgetés a Facebookon', 'btn' => 'Elmondom a véleményem', 'foot' => 'Önnek néhány másodperc, nekünk óriási segítség! 💗', 'copied' => 'Kimásolva! Illessze be egy Facebook-hozzászólásba', 'copy' => 'Másolás' ),
-			'cs' => array( 'from' => 'Slovo redakce', 'q' => 'Který názor je vám bližší?', 'hint' => 'Tyto varianty si můžete zkopírovat 👇', 'or' => 'Nebo napište svůj názor na Facebooku. Moc nás zajímá, co si myslíte!', 'disc' => 'Diskuze na Facebooku', 'btn' => 'Vyjádřit svůj názor', 'foot' => 'Pro vás pár vteřin, pro nás obrovská pomoc! 💗', 'copied' => 'Zkopírováno! Vložte do komentáře na Facebooku', 'copy' => 'Kopírovat' ),
-			'bg' => array( 'from' => 'Обръщение от редакцията', 'q' => 'Кое мнение ви е по-близо?', 'hint' => 'Можете да копирате тези варианти 👇', 'or' => 'Или напишете своето мнение във Facebook. Много ни е важно какво мислите!', 'disc' => 'Обсъждане във Facebook', 'btn' => 'Кажете мнението си', 'foot' => 'За вас — няколко секунди, за нас — огромна помощ! 💗', 'copied' => 'Копирано! Поставете го в коментар във Facebook', 'copy' => 'Копирай' ),
-			'tr' => array( 'from' => 'Editörden bir not', 'q' => 'Hangi görüş size daha yakın?', 'hint' => 'Bu seçenekleri kopyalayabilirsiniz 👇', 'or' => 'Ya da kendi görüşünüzü Facebook\'ta yazın. Ne düşündüğünüzü bilmek bizim için çok önemli!', 'disc' => 'Facebook\'ta tartışma', 'btn' => 'Görüşünü paylaş', 'foot' => 'Sizin için birkaç saniye, bizim için büyük bir yardım! 💗', 'copied' => 'Kopyalandı! Facebook yorumuna yapıştırın', 'copy' => 'Kopyala' ),
+			'ru' => array( 'cmts' => 'комментариев', 'from' => 'Обращение от редакции', 'q' => 'Какое мнение вам ближе?', 'hint' => 'Можете скопировать эти варианты 👇', 'or' => 'Или написать своё мнение в Facebook. Нам очень важно знать, что вы думаете!', 'disc' => 'Обсуждение в Facebook', 'btn' => 'Высказать своё мнение', 'foot' => 'Для вас — несколько секунд, для нас — огромная помощь! 💗', 'copied' => 'Скопировано! Вставьте в комментарий на Facebook', 'copy' => 'Скопировать' ),
+			'uk' => array( 'cmts' => 'коментарів', 'from' => 'Звернення від редакції', 'q' => 'Яка думка вам ближча?', 'hint' => 'Можете скопіювати ці варіанти 👇', 'or' => 'Або напишіть свою думку у Facebook. Нам дуже важливо знати, що ви думаєте!', 'disc' => 'Обговорення у Facebook', 'btn' => 'Висловити свою думку', 'foot' => 'Для вас — кілька секунд, для нас — величезна допомога! 💗', 'copied' => 'Скопійовано! Вставте в коментар у Facebook', 'copy' => 'Скопіювати' ),
+			'en' => array( 'cmts' => 'comments', 'from' => 'A note from the editors', 'q' => 'Which opinion is closer to yours?', 'hint' => 'You can copy these options 👇', 'or' => 'Or write your own opinion on Facebook. We really want to know what you think!', 'disc' => 'Discussion on Facebook', 'btn' => 'Share your opinion', 'foot' => 'A few seconds for you, a huge help for us! 💗', 'copied' => 'Copied! Paste it into a Facebook comment', 'copy' => 'Copy' ),
+			'de' => array( 'cmts' => 'Kommentare', 'from' => 'Ein Wort der Redaktion', 'q' => 'Welche Meinung teilen Sie eher?', 'hint' => 'Sie können diese Varianten kopieren 👇', 'or' => 'Oder schreiben Sie Ihre eigene Meinung auf Facebook. Es ist uns sehr wichtig, was Sie denken!', 'disc' => 'Diskussion auf Facebook', 'btn' => 'Meinung sagen', 'foot' => 'Für Sie ein paar Sekunden, für uns eine riesige Hilfe! 💗', 'copied' => 'Kopiert! Fügen Sie es in einen Facebook-Kommentar ein', 'copy' => 'Kopieren' ),
+			'fr' => array( 'cmts' => 'commentaires', 'from' => 'Un mot de la rédaction', 'q' => 'Quel avis vous ressemble le plus ?', 'hint' => 'Vous pouvez copier ces propositions 👇', 'or' => 'Ou écrivez votre propre avis sur Facebook. Nous tenons vraiment à savoir ce que vous pensez !', 'disc' => 'Discussion sur Facebook', 'btn' => 'Donner mon avis', 'foot' => 'Quelques secondes pour vous, une aide énorme pour nous ! 💗', 'copied' => 'Copié ! Collez-le dans un commentaire Facebook', 'copy' => 'Copier' ),
+			'es' => array( 'cmts' => 'comentarios', 'from' => 'Mensaje de la redacción', 'q' => '¿Qué opinión se parece más a la suya?', 'hint' => 'Puede copiar estas opciones 👇', 'or' => 'O escriba su propia opinión en Facebook. ¡Nos importa mucho lo que piensa!', 'disc' => 'Debate en Facebook', 'btn' => 'Dar mi opinión', 'foot' => '¡Para usted, unos segundos; para nosotros, una ayuda enorme! 💗', 'copied' => '¡Copiado! Péguelo en un comentario de Facebook', 'copy' => 'Copiar' ),
+			'pt' => array( 'cmts' => 'comentários', 'from' => 'Mensagem da redação', 'q' => 'Qual opinião é mais parecida com a sua?', 'hint' => 'Pode copiar estas opções 👇', 'or' => 'Ou escreva a sua própria opinião no Facebook. É muito importante para nós saber o que pensa!', 'disc' => 'Discussão no Facebook', 'btn' => 'Dar a minha opinião', 'foot' => 'Para si, alguns segundos; para nós, uma ajuda enorme! 💗', 'copied' => 'Copiado! Cole num comentário no Facebook', 'copy' => 'Copiar' ),
+			'it' => array( 'cmts' => 'commenti', 'from' => 'Un messaggio dalla redazione', 'q' => 'Quale opinione senti più vicina?', 'hint' => 'Puoi copiare queste opzioni 👇', 'or' => 'Oppure scrivi la tua opinione su Facebook. Per noi è importante sapere cosa ne pensi!', 'disc' => 'Discussione su Facebook', 'btn' => 'Dì la tua', 'foot' => 'Per te pochi secondi, per noi un aiuto enorme! 💗', 'copied' => 'Copiato! Incollalo in un commento su Facebook', 'copy' => 'Copia' ),
+			'pl' => array( 'cmts' => 'komentarzy', 'from' => 'Słowo od redakcji', 'q' => 'Która opinia jest Ci bliższa?', 'hint' => 'Możesz skopiować te warianty 👇', 'or' => 'Albo napisz własną opinię na Facebooku. Bardzo chcemy wiedzieć, co myślisz!', 'disc' => 'Dyskusja na Facebooku', 'btn' => 'Wyraź swoją opinię', 'foot' => 'Dla Ciebie kilka sekund, dla nas ogromna pomoc! 💗', 'copied' => 'Skopiowano! Wklej w komentarzu na Facebooku', 'copy' => 'Kopiuj' ),
+			'ro' => array( 'cmts' => 'comentarii', 'from' => 'Un mesaj de la redacție', 'q' => 'Ce părere vi se potrivește mai mult?', 'hint' => 'Puteți copia aceste variante 👇', 'or' => 'Sau scrieți propria părere pe Facebook. Contează mult pentru noi ce credeți!', 'disc' => 'Discuție pe Facebook', 'btn' => 'Spuneți-vă părerea', 'foot' => 'Pentru dvs. câteva secunde, pentru noi un ajutor uriaș! 💗', 'copied' => 'Copiat! Lipiți-l într-un comentariu pe Facebook', 'copy' => 'Copiază' ),
+			'hu' => array( 'cmts' => 'hozzászólás', 'from' => 'A szerkesztőség üzenete', 'q' => 'Melyik vélemény áll közelebb Önhöz?', 'hint' => 'Ezeket a változatokat kimásolhatja 👇', 'or' => 'Vagy írja meg saját véleményét a Facebookon. Nagyon fontos nekünk, mit gondol!', 'disc' => 'Beszélgetés a Facebookon', 'btn' => 'Elmondom a véleményem', 'foot' => 'Önnek néhány másodperc, nekünk óriási segítség! 💗', 'copied' => 'Kimásolva! Illessze be egy Facebook-hozzászólásba', 'copy' => 'Másolás' ),
+			'cs' => array( 'cmts' => 'komentářů', 'from' => 'Slovo redakce', 'q' => 'Který názor je vám bližší?', 'hint' => 'Tyto varianty si můžete zkopírovat 👇', 'or' => 'Nebo napište svůj názor na Facebooku. Moc nás zajímá, co si myslíte!', 'disc' => 'Diskuze na Facebooku', 'btn' => 'Vyjádřit svůj názor', 'foot' => 'Pro vás pár vteřin, pro nás obrovská pomoc! 💗', 'copied' => 'Zkopírováno! Vložte do komentáře na Facebooku', 'copy' => 'Kopírovat' ),
+			'bg' => array( 'cmts' => 'коментара', 'from' => 'Обръщение от редакцията', 'q' => 'Кое мнение ви е по-близо?', 'hint' => 'Можете да копирате тези варианти 👇', 'or' => 'Или напишете своето мнение във Facebook. Много ни е важно какво мислите!', 'disc' => 'Обсъждане във Facebook', 'btn' => 'Кажете мнението си', 'foot' => 'За вас — няколко секунди, за нас — огромна помощ! 💗', 'copied' => 'Копирано! Поставете го в коментар във Facebook', 'copy' => 'Копирай' ),
+			'tr' => array( 'cmts' => 'yorum', 'from' => 'Editörden bir not', 'q' => 'Hangi görüş size daha yakın?', 'hint' => 'Bu seçenekleri kopyalayabilirsiniz 👇', 'or' => 'Ya da kendi görüşünüzü Facebook\'ta yazın. Ne düşündüğünüzü bilmek bizim için çok önemli!', 'disc' => 'Facebook\'ta tartışma', 'btn' => 'Görüşünü paylaş', 'foot' => 'Sizin için birkaç saniye, bizim için büyük bir yardım! 💗', 'copied' => 'Kopyalandı! Facebook yorumuna yapıştırın', 'copy' => 'Kopyala' ),
 		);
 		return isset( $all[ $lang ] ) ? $all[ $lang ] : $all['ru'];
 	}

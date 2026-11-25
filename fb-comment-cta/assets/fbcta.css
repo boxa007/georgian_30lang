@@ -19,6 +19,7 @@
 .fbcta-copy{flex:0 0 38px;width:38px;height:38px;border:0;border-radius:10px;background:#e7f0fd;color:#1877f2;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
 .fbcta-copy:hover{background:#d6e6fc}
 .fbcta-fb{text-align:center;font-size:13px;color:#65676b;margin:4px 0 10px}
+.fbcta-counts{display:flex;justify-content:center;gap:18px;font-size:13px;color:#65676b;margin:-4px 0 10px}
 .fbcta-f{display:inline-block;width:14px;height:14px;line-height:14px;border-radius:50%;background:#1877f2;color:#fff;font-weight:700;font-size:10px;text-align:center}
 .fbcta-btn{display:block;text-align:center;background:#1877f2;color:#fff!important;text-decoration:none!important;font-weight:700;font-size:17px;padding:14px 16px;border-radius:12px;margin-bottom:12px}
 .fbcta-btn:hover{background:#166fe0}
