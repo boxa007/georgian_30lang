@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FB Comment CTA
  * Description: At the end of part 4 of a story shows an editorial request to comment on Facebook, with 3 ready-made comments unique to each visitor (generated centrally in n8n). Counts views and clicks per call-to-action variant.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class FB_Comment_CTA {
-	const VERSION    = '1.0.0';
+	const VERSION    = '1.0.1';
 	const REPO       = 'boxa007/georgian_30lang';
 	const TAG_PREFIX = 'fbc-v';
 	const OPT        = 'fbc_settings';
@@ -22,6 +22,8 @@ class FB_Comment_CTA {
 
 	public function __construct() {
 		add_filter( 'the_content', array( $this, 'inject' ), 50 );
+		/* Fallback for themes that print the post outside the standard loop: print the block in the footer, JS moves it into place. */
+		add_action( 'wp_footer', array( $this, 'footer_fallback' ), 5 );
 		add_shortcode( 'fb_comment_cta', array( $this, 'shortcode' ) );
 		add_action( 'wp_enqueue_scripts', array( $this, 'assets' ) );
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
@@ -142,7 +144,7 @@ class FB_Comment_CTA {
 	}
 
 	public function inject( $content ) {
-		if ( $this->printed || ! in_the_loop() || ! is_main_query() || ! $this->visible() ) {
+		if ( $this->printed || ! $this->visible() || (int) get_the_ID() !== (int) get_queried_object_id() ) {
 			return $content;
 		}
 		$pos = strrpos( $content, self::MARKER );
@@ -150,6 +152,17 @@ class FB_Comment_CTA {
 			return $content; // not a part 4
 		}
 		return substr( $content, 0, $pos ) . $this->block( $content ) . substr( $content, $pos );
+	}
+
+	public function footer_fallback() {
+		if ( $this->printed || ! $this->visible() ) {
+			return;
+		}
+		$post = get_queried_object();
+		if ( ! $post || empty( $post->post_content ) || false === strpos( $post->post_content, self::MARKER ) ) {
+			return;
+		}
+		echo $this->block( apply_filters( 'fbc_story_source', $post->post_content ), true ); // phpcs:ignore
 	}
 
 	public function shortcode() {
@@ -160,7 +173,7 @@ class FB_Comment_CTA {
 		return $this->block( $post ? apply_filters( 'fbc_story_source', $post->post_content ) : '' );
 	}
 
-	private function block( $content ) {
+	private function block( $content, $move = false ) {
 		$this->printed = true;
 		$s    = $this->settings();
 		$t    = self::texts( $s['lang'] );
@@ -182,7 +195,7 @@ class FB_Comment_CTA {
 		$copy   = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 3h9a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3zm0 2a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H8zM3 8a1 1 0 0 1 1 1v9a2 2 0 0 0 2 2h9a1 1 0 1 1 0 2H6a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/></svg>';
 		ob_start();
 		?>
-		<div class="fbcta" data-fbcta="<?php echo esc_attr( wp_json_encode( $data ) ); ?>" hidden>
+		<div class="fbcta" data-fbcta="<?php echo esc_attr( wp_json_encode( $data ) ); ?>"<?php echo $move ? ' data-move="1"' : ''; ?> hidden>
 			<div class="fbcta-head">
 				<img class="fbcta-avatar" src="<?php echo esc_url( $avatar ); ?>" alt="" width="88" height="88" loading="lazy">
 				<div><div class="fbcta-title"></div><div class="fbcta-sub"><?php echo esc_html( $t['from'] ); ?></div></div>

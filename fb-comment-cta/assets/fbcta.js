@@ -59,7 +59,17 @@
       .catch(function () { clearTimeout(timer); });
   }
 
+  function place(box) {
+    /* Block printed in the footer (theme without standard loop): move it right before «Missed the beginning?». */
+    if (!box.hasAttribute('data-move')) return;
+    var all = document.querySelectorAll('div[style*="max-width:640px;margin:40px auto 0"]');
+    var target = all.length ? all[all.length - 1] : null;
+    if (target && target.parentNode) { target.parentNode.insertBefore(box, target); }
+    box.removeAttribute('data-move');
+  }
+
   function init() {
+    document.querySelectorAll('.fbcta[data-move]').forEach(place);
     var boxes = document.querySelectorAll('.fbcta[data-fbcta]');
     if (!boxes.length) return;
     if (!('IntersectionObserver' in window)) { boxes.forEach(load); return; }
