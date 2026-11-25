@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FB Comment CTA
  * Description: At the end of part 4 of a story shows an editorial request to comment on Facebook, with 3 ready-made comments unique to each visitor (generated centrally in n8n). Counts views and clicks per call-to-action variant.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class FB_Comment_CTA {
-	const VERSION    = '1.0.1';
+	const VERSION    = '1.0.2';
 	const REPO       = 'boxa007/georgian_30lang';
 	const TAG_PREFIX = 'fbc-v';
 	const OPT        = 'fbc_settings';
@@ -144,7 +144,8 @@ class FB_Comment_CTA {
 	}
 
 	public function inject( $content ) {
-		if ( $this->printed || ! $this->visible() || (int) get_the_ID() !== (int) get_queried_object_id() ) {
+		/* Skip early calls (excerpts / SEO descriptions built in <head>) — they would "use up" the block. */
+		if ( $this->printed || ! did_action( 'wp_head' ) || doing_filter( 'get_the_excerpt' ) || doing_filter( 'wp_trim_excerpt' ) || ! $this->visible() || (int) get_the_ID() !== (int) get_queried_object_id() ) {
 			return $content;
 		}
 		$pos = strrpos( $content, self::MARKER );
@@ -155,14 +156,24 @@ class FB_Comment_CTA {
 	}
 
 	public function footer_fallback() {
-		if ( $this->printed || ! $this->visible() ) {
+		/* Always printed for a part 4: if the in-content block is on the page, JS removes this copy. */
+		if ( ! $this->visible() ) {
 			return;
 		}
-		$post = get_queried_object();
-		if ( ! $post || empty( $post->post_content ) || false === strpos( $post->post_content, self::MARKER ) ) {
+		$qo = get_queried_object();
+		if ( ! $qo || empty( $qo->post_content ) || false === strpos( $qo->post_content, self::MARKER ) ) {
 			return;
 		}
-		echo $this->block( apply_filters( 'fbc_story_source', $post->post_content ), true ); // phpcs:ignore
+		$this->printed = false;
+		global $post;
+		$saved = $post;
+		$post  = get_queried_object(); // the footer may run after a "related posts" loop
+		setup_postdata( $post );
+		echo $this->block( $post->post_content, true ); // phpcs:ignore
+		$post = $saved;
+		if ( $saved ) {
+			setup_postdata( $saved );
+		}
 	}
 
 	public function shortcode() {

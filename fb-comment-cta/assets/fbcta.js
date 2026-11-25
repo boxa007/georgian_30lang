@@ -69,7 +69,12 @@
   }
 
   function init() {
-    document.querySelectorAll('.fbcta[data-move]').forEach(place);
+    var inContent = document.querySelector('.fbcta:not([data-move])');
+    document.querySelectorAll('.fbcta[data-move]').forEach(function (b) {
+      if (inContent) { b.parentNode.removeChild(b); } else { place(b); inContent = b; }
+    });
+    var extra = document.querySelectorAll('.fbcta');
+    for (var i = 1; i < extra.length; i++) { extra[i].parentNode.removeChild(extra[i]); }
     var boxes = document.querySelectorAll('.fbcta[data-fbcta]');
     if (!boxes.length) return;
     if (!('IntersectionObserver' in window)) { boxes.forEach(load); return; }
