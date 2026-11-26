@@ -19,8 +19,10 @@
   var COPY_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 3h9a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3zm0 2a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H8zM3 8a1 1 0 0 1 1 1v9a2 2 0 0 0 2 2h9a1 1 0 1 1 0 2H6a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/></svg>';
 
   function fill(box, d, r) {
-    var hasPost = !!r.fb_post_url;
-    var link = r.fb_post_url || r.fb_page_url || d.fbPage || 'https://www.facebook.com/';
+    /* Links come only from this article's own fields in WordPress (set by n8n). */
+    var hasPost = !!d.fbPost;
+    var link = d.fbPost || d.fbPage;
+    if (!link) return;
     box.querySelector('.fbcta-title').textContent = (d.pick && d.pick.title) || r.title || '';
     box.querySelector('.fbcta-body').textContent = (d.pick && d.pick.body) || r.body || '';
     if (d.pick) r.nr = d.pick.nr;

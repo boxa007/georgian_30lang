@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FB Comment CTA
  * Description: At the end of part 4 of a story shows an editorial request to comment on Facebook, with 3 ready-made comments unique to each visitor (generated centrally in n8n). Counts views and clicks per call-to-action variant.
- * Version: 1.1.1
+ * Version: 1.2.0
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class FB_Comment_CTA {
-	const VERSION    = '1.1.1';
+	const VERSION    = '1.2.0';
 	const VAR_OPT    = 'fbc_variants';
 	const REPO       = 'boxa007/georgian_30lang';
 	const TAG_PREFIX = 'fbc-v';
@@ -32,6 +32,8 @@ class FB_Comment_CTA {
 		/* Call-to-action texts live in this site's database; they are pulled from the central table
 		   on activation, by the «update on all sites» hook (REST /fbc/v1/refresh) or by the button in Settings. */
 		add_action( 'rest_api_init', array( $this, 'rest_routes' ) );
+		/* Per-article Facebook links (written by n8n through the WP REST API): the block is shown only where at least one is set. */
+		add_action( 'init', array( $this, 'register_meta' ) );
 		add_action( 'admin_post_fbc_pull', array( $this, 'admin_pull' ) );
 		add_action( 'init', array( $this, 'first_pull' ), 30 );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( $this, 'action_links' ) );
@@ -41,6 +43,33 @@ class FB_Comment_CTA {
 		add_filter( 'upgrader_source_selection', array( $this, 'keep_folder_name' ), 10, 4 );
 		add_action( 'admin_post_fbc_update_from_github', array( $this, 'update_from_github' ) );
 		add_action( 'admin_notices', array( $this, 'render_update_notice' ) );
+	}
+
+	/* ---------- per-article Facebook links ---------- */
+
+	public function register_meta() {
+		foreach ( array( 'fbc_fb_page', 'fbc_fb_post' ) as $key ) {
+			register_post_meta( 'post', $key, array(
+				'type'              => 'string',
+				'single'            => true,
+				'show_in_rest'      => true,
+				'sanitize_callback' => 'esc_url_raw',
+				'auth_callback'     => function () { return current_user_can( 'edit_posts' ); },
+			) );
+		}
+	}
+
+	/** Facebook links of an article: the post link wins over the page link. */
+	public function links( $post_id ) {
+		return array(
+			'post' => (string) get_post_meta( $post_id, 'fbc_fb_post', true ),
+			'page' => (string) get_post_meta( $post_id, 'fbc_fb_page', true ),
+		);
+	}
+
+	private function has_link( $post_id ) {
+		$l = $this->links( $post_id );
+		return '' !== $l['post'] || '' !== $l['page'];
 	}
 
 	/* ---------- call-to-action texts (stored in WP) ---------- */
@@ -144,7 +173,6 @@ class FB_Comment_CTA {
 			'enabled'    => '1',
 			'only_admin' => '0',
 			'lang'       => 'ru',
-			'fb_page'    => '',
 			'avatar'     => '',
 			'api'        => 'https://kuts.air2.top/webhook',
 			'counts'     => '1',
@@ -163,7 +191,6 @@ class FB_Comment_CTA {
 			'enabled'    => empty( $in['enabled'] ) ? '0' : '1',
 			'only_admin' => empty( $in['only_admin'] ) ? '0' : '1',
 			'lang'       => isset( $in['lang'], self::langs()[ $in['lang'] ] ) ? $in['lang'] : 'ru',
-			'fb_page'    => esc_url_raw( isset( $in['fb_page'] ) ? trim( $in['fb_page'] ) : '' ),
 			'avatar'     => esc_url_raw( isset( $in['avatar'] ) ? trim( $in['avatar'] ) : '' ),
 			'api'        => esc_url_raw( isset( $in['api'] ) && trim( $in['api'] ) ? untrailingslashit( trim( $in['api'] ) ) : 'https://kuts.air2.top/webhook' ),
 			'counts'     => empty( $in['counts'] ) ? '0' : '1',
@@ -201,7 +228,7 @@ class FB_Comment_CTA {
 		?>
 		<div class="wrap">
 			<h1>FB Comment CTA <small style="font-weight:normal">v<?php echo esc_html( self::VERSION ); ?></small></h1>
-			<p>Блок «Обращение от редакции» с 3 готовыми комментариями выводится в конце каждой ЧАСТИ 4, перед ссылкой «Читать историю с первой части». В любое другое место можно поставить шорткод <code>[fb_comment_cta]</code>.</p>
+			<p>Блок выводится только в статьях, где n8n записал ссылку на страницу или публикацию Facebook (поля fbc_fb_page / fbc_fb_post). Блок «Обращение от редакции» с 3 готовыми комментариями выводится в конце каждой ЧАСТИ 4, перед ссылкой «Читать историю с первой части». В любое другое место можно поставить шорткод <code>[fb_comment_cta]</code>.</p>
 			<form method="post" action="options.php">
 				<?php settings_fields( 'fbc' ); ?>
 				<table class="form-table">
@@ -212,7 +239,6 @@ class FB_Comment_CTA {
 							<option value="<?php echo esc_attr( $code ); ?>" <?php selected( $s['lang'], $code ); ?>><?php echo esc_html( $label ); ?></option>
 						<?php endforeach; ?>
 					</select><p class="description">Язык надписей, призыва и готовых комментариев.</p></td></tr>
-					<tr><th>Страница Facebook</th><td><input type="url" class="regular-text" name="<?php echo esc_attr( $n ); ?>[fb_page]" value="<?php echo esc_attr( $s['fb_page'] ); ?>" placeholder="https://www.facebook.com/..."><p class="description">Запасной адрес: используется, если в Baserow для статьи нет ни fb_post_url, ни FB Page URL.</p></td></tr>
 					<tr><th>Аватар</th><td><input type="url" class="regular-text" name="<?php echo esc_attr( $n ); ?>[avatar]" value="<?php echo esc_attr( $s['avatar'] ); ?>" placeholder="(по умолчанию — общий аватар редакции)"></td></tr>
 					<tr><th>Счётчики</th><td><label><input type="checkbox" name="<?php echo esc_attr( $n ); ?>[counts]" value="1" <?php checked( $s['counts'], '1' ); ?>> показывать строку с лайками и комментариями</label><br>
 						лайки <input type="text" size="8" name="<?php echo esc_attr( $n ); ?>[likes]" value="<?php echo esc_attr( $s['likes'] ); ?>"> &nbsp; комментарии <input type="text" size="8" name="<?php echo esc_attr( $n ); ?>[comments]" value="<?php echo esc_attr( $s['comments'] ); ?>">
@@ -248,7 +274,8 @@ class FB_Comment_CTA {
 		if ( '1' === $s['only_admin'] && ! current_user_can( 'manage_options' ) && empty( $_GET['fbcta'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
 			return false;
 		}
-		return true;
+		/* No Facebook link for this article (neither page nor post) — no block. */
+		return $this->has_link( get_queried_object_id() );
 	}
 
 	public function inject( $content ) {
@@ -321,7 +348,8 @@ class FB_Comment_CTA {
 			'lang'   => $s['lang'],
 			'title'  => get_the_title(),
 			'text'   => $text,
-			'fbPage' => $s['fb_page'],
+			'fbPost' => $this->links( get_queried_object_id() )['post'],
+			'fbPage' => $this->links( get_queried_object_id() )['page'],
 			't'      => $t,
 		);
 		$avatar = $s['avatar'] ? $s['avatar'] : plugins_url( 'assets/avatar.jpg', __FILE__ );
