@@ -26,8 +26,11 @@
     if (d.pick) r.nr = d.pick.nr;
     var list = box.querySelector('.fbcta-list');
     var comments = (r.comments || []).slice(0, 3);
+    var copied = false;
     if (!comments.length) {
+      /* No ready comments for this article yet: just ask to go to Facebook, like and comment. */
       ['.fbcta-hint', '.fbcta-list'].forEach(function (s) { var x = box.querySelector(s); if (x) x.style.display = 'none'; });
+      var orl = box.querySelector('.fbcta-or'); if (orl && d.t.nocomm) orl.textContent = d.t.nocomm;
     }
     comments.forEach(function (c) {
       var row = el('div', 'fbcta-item'); var p = el('span', 'fbcta-text', c);
@@ -37,13 +40,14 @@
           box.querySelectorAll('.fbcta-item').forEach(function (x) { x.classList.remove('is-copied'); });
           row.classList.add('is-copied'); row.setAttribute('data-done', d.t.copied);
         }, function () {});
+        copied = true;
         hit(d, 'copy', r.nr, hasPost); // copying alone does not use up the comments
       };
       b.addEventListener('click', act); p.addEventListener('click', act);
       row.appendChild(p); row.appendChild(b); list.appendChild(row);
     });
     var btn = box.querySelector('.fbcta-btn'); btn.href = link;
-    btn.addEventListener('click', function () { hit(d, 'click', r.nr, hasPost, r.set_id); }); // going to Facebook uses up this set
+    btn.addEventListener('click', function () { hit(d, 'click', r.nr, hasPost, copied ? r.set_id : 0); }); // a set is used up only if it was copied AND the reader went to Facebook
     box.classList.remove('fbcta-wait'); box.hidden = false;
   }
 
