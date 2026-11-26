@@ -1,9 +1,9 @@
 /* FB Comment CTA: fills the block from n8n (cta-get), logs copy/click to cta-hit. */
 (function () {
   'use strict';
-  function hit(d, ev, nr, hasPost) {
+  function hit(d, ev, nr, hasPost, setId) {
     try {
-      var u = d.api + '/cta-hit?e=' + ev + '&u=' + encodeURIComponent(d.url) + '&v=' + (nr || 0) + '&l=' + encodeURIComponent(d.lang) + '&s=' + encodeURIComponent(d.site) + '&p=' + (hasPost ? 1 : 0);
+      var u = d.api + '/cta-hit?e=' + ev + '&u=' + encodeURIComponent(d.url) + '&v=' + (nr || 0) + '&l=' + encodeURIComponent(d.lang) + '&s=' + encodeURIComponent(d.site) + '&p=' + (hasPost ? 1 : 0) + '&c=' + (setId || 0);
       if (window.fetch) { fetch(u, { method: 'GET', mode: 'no-cors', keepalive: true }).catch(function () {}); } else { (new Image()).src = u; }
     } catch (e) {}
   }
@@ -37,13 +37,13 @@
           box.querySelectorAll('.fbcta-item').forEach(function (x) { x.classList.remove('is-copied'); });
           row.classList.add('is-copied'); row.setAttribute('data-done', d.t.copied);
         }, function () {});
-        hit(d, 'copy', r.nr, hasPost);
+        hit(d, 'copy', r.nr, hasPost); // copying alone does not use up the comments
       };
       b.addEventListener('click', act); p.addEventListener('click', act);
       row.appendChild(p); row.appendChild(b); list.appendChild(row);
     });
     var btn = box.querySelector('.fbcta-btn'); btn.href = link;
-    btn.addEventListener('click', function () { hit(d, 'click', r.nr, hasPost); });
+    btn.addEventListener('click', function () { hit(d, 'click', r.nr, hasPost, r.set_id); }); // going to Facebook uses up this set
     box.classList.remove('fbcta-wait'); box.hidden = false;
   }
 
