@@ -21,8 +21,9 @@
   function fill(box, d, r) {
     var hasPost = !!r.fb_post_url;
     var link = r.fb_post_url || r.fb_page_url || d.fbPage || 'https://www.facebook.com/';
-    box.querySelector('.fbcta-title').textContent = r.title || '';
-    box.querySelector('.fbcta-body').textContent = r.body || '';
+    box.querySelector('.fbcta-title').textContent = (d.pick && d.pick.title) || r.title || '';
+    box.querySelector('.fbcta-body').textContent = (d.pick && d.pick.body) || r.body || '';
+    if (d.pick) r.nr = d.pick.nr;
     var list = box.querySelector('.fbcta-list');
     var comments = (r.comments || []).slice(0, 3);
     if (!comments.length) {
@@ -49,11 +50,13 @@
   function load(box) {
     var d; try { d = JSON.parse(box.getAttribute('data-fbcta')); } catch (e) { return; }
     box.removeAttribute('data-fbcta');
+    /* The call-to-action text is chosen here (texts are stored on this site), evenly at random. */
+    if (d.variants && d.variants.length) d.pick = d.variants[Math.floor(Math.random() * d.variants.length)];
     var ctl = window.AbortController ? new AbortController() : null;
     var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 30000);
     fetch(d.api + '/cta-get', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl ? ctl.signal : undefined,
-      body: JSON.stringify({ url: d.url, site: d.site, lang: d.lang, title: d.title, text: d.text, ua: navigator.userAgent })
+      body: JSON.stringify({ url: d.url, site: d.site, lang: d.lang, title: d.title, text: d.text, ua: navigator.userAgent, nr: d.pick ? d.pick.nr : 0 })
     }).then(function (res) { return res.ok ? res.json() : null; })
       .then(function (r) { clearTimeout(timer); if (r && r.ok) fill(box, d, r); })
       .catch(function () { clearTimeout(timer); });

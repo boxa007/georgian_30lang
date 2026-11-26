@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FB Comment CTA
  * Description: At the end of part 4 of a story shows an editorial request to comment on Facebook, with 3 ready-made comments unique to each visitor (generated centrally in n8n). Counts views and clicks per call-to-action variant.
- * Version: 1.0.2
+ * Version: 1.1.0
  * Update URI: https://github.com/boxa007/georgian_30lang
  */
 
@@ -11,7 +11,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class FB_Comment_CTA {
-	const VERSION    = '1.0.2';
+	const VERSION    = '1.1.0';
+	const VAR_OPT    = 'fbc_variants';
 	const REPO       = 'boxa007/georgian_30lang';
 	const TAG_PREFIX = 'fbc-v';
 	const OPT        = 'fbc_settings';
@@ -28,6 +29,11 @@ class FB_Comment_CTA {
 		add_action( 'wp_enqueue_scripts', array( $this, 'assets' ) );
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
+		/* Call-to-action texts live in this site's database; they are pulled from the central table
+		   on activation, by the «update on all sites» hook (REST /fbc/v1/refresh) or by the button in Settings. */
+		add_action( 'rest_api_init', array( $this, 'rest_routes' ) );
+		add_action( 'admin_post_fbc_pull', array( $this, 'admin_pull' ) );
+		add_action( 'init', array( $this, 'first_pull' ), 30 );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( $this, 'action_links' ) );
 		/* Self-update from GitHub releases (tags fbc-vX.Y.Z). */
 		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'inject_update' ) );
@@ -35,6 +41,95 @@ class FB_Comment_CTA {
 		add_filter( 'upgrader_source_selection', array( $this, 'keep_folder_name' ), 10, 4 );
 		add_action( 'admin_post_fbc_update_from_github', array( $this, 'update_from_github' ) );
 		add_action( 'admin_notices', array( $this, 'render_update_notice' ) );
+	}
+
+	/* ---------- call-to-action texts (stored in WP) ---------- */
+
+	public static function activate() {
+		$self = new self();
+		$self->pull_variants( false );
+	}
+
+	public function variants() {
+		$v = get_option( self::VAR_OPT, array() );
+		return ( is_array( $v ) && ! empty( $v['list'] ) && is_array( $v['list'] ) ) ? $v['list'] : array();
+	}
+
+	/** Download the active texts from n8n and store them in this site's database. */
+	public function pull_variants( $by_hook ) {
+		$s   = $this->settings();
+		$url = add_query_arg( array(
+			'site'    => wp_parse_url( home_url(), PHP_URL_HOST ),
+			'url'     => home_url(),
+			'v'       => self::VERSION,
+			'lang'    => $s['lang'],
+			'refresh' => $by_hook ? '1' : '0',
+		), $s['api'] . '/cta-variants' );
+		$res = wp_remote_get( $url, array( 'timeout' => 20 ) );
+		if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
+			return is_wp_error( $res ) ? $res->get_error_message() : 'HTTP ' . wp_remote_retrieve_response_code( $res );
+		}
+		$data = json_decode( wp_remote_retrieve_body( $res ), true );
+		if ( empty( $data['ok'] ) || ! isset( $data['variants'] ) || ! is_array( $data['variants'] ) ) {
+			return 'bad response';
+		}
+		$list = array();
+		foreach ( $data['variants'] as $v ) {
+			if ( empty( $v['nr'] ) || empty( $v['title'] ) || empty( $v['body'] ) ) {
+				continue;
+			}
+			$list[] = array(
+				'lang'  => sanitize_key( isset( $v['lang'] ) ? $v['lang'] : 'ru' ),
+				'nr'    => (int) $v['nr'],
+				'title' => sanitize_text_field( $v['title'] ),
+				'body'  => sanitize_textarea_field( $v['body'] ),
+			);
+		}
+		update_option( self::VAR_OPT, array( 'updated' => time(), 'list' => $list ) );
+		return count( $list );
+	}
+
+	/* Sites updated from 1.0.x have no stored texts yet: pull once (and register for the hook). */
+	public function first_pull() {
+		if ( false !== get_option( self::VAR_OPT, false ) || get_transient( 'fbc_pull_lock' ) ) {
+			return;
+		}
+		set_transient( 'fbc_pull_lock', 1, 10 * MINUTE_IN_SECONDS );
+		$this->pull_variants( false );
+	}
+
+	public function rest_routes() {
+		register_rest_route( 'fbc/v1', '/refresh', array(
+			'methods'             => array( 'GET', 'POST' ),
+			'permission_callback' => '__return_true', // only triggers a download from the fixed central address
+			'callback'            => array( $this, 'rest_refresh' ),
+		) );
+	}
+
+	public function rest_refresh() {
+		if ( get_transient( 'fbc_refresh_lock' ) ) {
+			return new WP_REST_Response( array( 'ok' => true, 'count' => count( $this->variants() ), 'throttled' => true ), 200 );
+		}
+		set_transient( 'fbc_refresh_lock', 1, 15 );
+		$r = $this->pull_variants( true );
+		if ( ! is_int( $r ) ) {
+			return new WP_REST_Response( array( 'ok' => false, 'error' => $r ), 502 );
+		}
+		if ( function_exists( 'w3tc_flush_all' ) ) {
+			w3tc_flush_all(); // pages may hold the old texts in cache
+		}
+		return new WP_REST_Response( array( 'ok' => true, 'count' => $r ), 200 );
+	}
+
+	public function admin_pull() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( 'No permission.' );
+		}
+		check_admin_referer( 'fbc_pull' );
+		$r = $this->pull_variants( true );
+		set_transient( 'fbc_update_notice_' . get_current_user_id(), is_int( $r ) ? 'FB Comment CTA: загружено призывов — ' . $r . '.' : 'FB Comment CTA: не удалось загрузить призывы (' . $r . ').', MINUTE_IN_SECONDS );
+		wp_safe_redirect( admin_url( 'options-general.php?page=fb-comment-cta' ) );
+		exit;
 	}
 
 	/* ---------- settings ---------- */
@@ -126,6 +221,19 @@ class FB_Comment_CTA {
 				</table>
 				<?php submit_button(); ?>
 			</form>
+			<?php
+			$opt  = get_option( self::VAR_OPT, array() );
+			$list = $this->variants();
+			?>
+			<h2>Призывы на этом сайте (<?php echo (int) count( $list ); ?>)</h2>
+			<p>Обновлены: <?php echo ! empty( $opt['updated'] ) ? esc_html( wp_date( 'd.m.Y H:i', $opt['updated'] ) ) : 'ещё не загружались'; ?>.
+				<a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=fbc_pull' ), 'fbc_pull' ) ); ?>">Обновить призывы сейчас</a></p>
+			<p class="description">Тексты берутся из таблицы «Призывы» в Baserow. Обновить на всех сайтах сразу: <code><?php echo esc_html( $s['api'] . '/cta-push' ); ?></code></p>
+			<table class="widefat striped" style="max-width:900px"><thead><tr><th>№</th><th>Язык</th><th>Заголовок</th><th>Текст</th></tr></thead><tbody>
+			<?php foreach ( $list as $v ) : ?>
+				<tr><td><?php echo (int) $v['nr']; ?></td><td><?php echo esc_html( $v['lang'] ); ?></td><td><?php echo esc_html( $v['title'] ); ?></td><td><?php echo esc_html( $v['body'] ); ?></td></tr>
+			<?php endforeach; ?>
+			</tbody></table>
 		</div>
 		<?php
 	}
@@ -192,7 +300,21 @@ class FB_Comment_CTA {
 		if ( function_exists( 'mb_substr' ) && mb_strlen( $text ) > 6000 ) {
 			$text = mb_substr( $text, -6000 ); // the ending is what readers react to
 		}
+		$mine = array();
+		foreach ( $this->variants() as $v ) {
+			if ( $v['lang'] === $s['lang'] ) {
+				$mine[] = array( 'nr' => $v['nr'], 'title' => $v['title'], 'body' => $v['body'] );
+			}
+		}
+		if ( ! $mine ) {
+			foreach ( $this->variants() as $v ) {
+				if ( 'ru' === $v['lang'] ) {
+					$mine[] = array( 'nr' => $v['nr'], 'title' => $v['title'], 'body' => $v['body'] );
+				}
+			}
+		}
 		$data = array(
+			'variants' => $mine,
 			'api'    => $s['api'],
 			'url'    => get_permalink(),
 			'site'   => wp_parse_url( home_url(), PHP_URL_HOST ),
@@ -360,3 +482,4 @@ class FB_Comment_CTA {
 }
 
 new FB_Comment_CTA();
+register_activation_hook( __FILE__, array( 'FB_Comment_CTA', 'activate' ) );
